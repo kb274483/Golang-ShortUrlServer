@@ -15,12 +15,12 @@ var redisClient *redis.Client
 
 func init() {
 	// 初始化 Redis 客戶端
-	redisClient = redis.NewClient(&redis.Options{
-		// 替換為您的 ElastiCache（Redis）伺服器地址
-		Addr:     "clustercfg.royshorturlredis.3evrc8.memorydb.ap-northeast-1.amazonaws.com:6379",
-		Password: "", // 如果有密碼，請填寫密碼
-		DB:       0,
-	})
+	// redisClient = redis.NewClient(&redis.Options{
+	// 	// 替換為您的 ElastiCache（Redis）伺服器地址
+	// 	Addr:     "clustercfg.royshorturlredis.3evrc8.memorydb.ap-northeast-1.amazonaws.com:6379",
+	// 	Password: "", // 如果有密碼，請填寫密碼
+	// 	DB:       0,
+	// })
 }
 
 func main() {
