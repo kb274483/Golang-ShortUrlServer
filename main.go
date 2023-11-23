@@ -35,11 +35,11 @@ func main() {
 	r.GET("/:shortURL", redirectURL)
 
 	// 測試
-	pong, err := redisClient.Ping(context.Background()).Result()
-	if err != nil {
-		log.Fatal("Error connecting to Redis:", err)
-	}
-	fmt.Println("Connected to Redis:", pong)
+	// pong, err := redisClient.Ping(context.Background()).Result()
+	// if err != nil {
+	// 	log.Fatal("Error connecting to Redis:", err)
+	// }
+	// fmt.Println("Connected to Redis:", pong)
 	// 啟動服務
 	port := ":8080"
 	fmt.Printf("Server is running on http://localhost%s\n", port)
