@@ -25,7 +25,7 @@ func main() {
 	r := gin.Default()
 
 	// 定義路由
-	r.GET("/", func(c *gin.Context) {
+	r.GET("/backend/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
 	})
 	// r.POST("/shorten", shortenURL)
