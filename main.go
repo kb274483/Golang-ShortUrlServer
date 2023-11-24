@@ -16,12 +16,12 @@ var redisClient *redis.Client
 
 func init() {
 	redisHost := os.Getenv("REDIS_HOST")
-	redisPassword := os.Getenv("REDIS_PASSWORD")
+	// redisPassword := os.Getenv("REDIS_PASSWORD")
 	// 初始化 Redis 客戶端
 	redisClient = redis.NewClient(&redis.Options{
-		Addr:     redisHost,
-		Password: redisPassword,
-		DB:       0,
+		Addr: redisHost,
+		// Password: redisPassword,
+		// DB:       0,
 	})
 }
 
