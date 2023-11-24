@@ -14,17 +14,6 @@ import (
 
 var redisClient *redis.Client
 
-func init() {
-	redisHost := os.Getenv("REDIS_HOST")
-	// redisPassword := os.Getenv("REDIS_PASSWORD")
-	// 初始化 Redis 客戶端
-	redisClient = redis.NewClient(&redis.Options{
-		Addr: redisHost,
-		// Password: redisPassword,
-		// DB:       0,
-	})
-}
-
 func main() {
 	// 初始化 Gin 引擎
 	r := gin.Default()
@@ -38,6 +27,7 @@ func main() {
 		fmt.Println("無法載入 .env 文件")
 		return
 	}
+	initRedisConnection()
 	// 測試
 	pong, err := redisClient.Ping(context.Background()).Result()
 	if err != nil {
@@ -47,4 +37,12 @@ func main() {
 	// 啟動服務
 	port := ":8080"
 	log.Fatal(r.Run(port))
+}
+
+func initRedisConnection() {
+	redisHost := os.Getenv("REDIS_HOST")
+	// 初始化 Redis 客戶端
+	redisClient = redis.NewClient(&redis.Options{
+		Addr: redisHost,
+	})
 }
