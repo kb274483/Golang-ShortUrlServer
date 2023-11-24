@@ -46,5 +46,6 @@ func initRedisConnection() {
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     redisHost,
 		Password: redisPassword,
+		DB:       0,
 	})
 }
