@@ -49,7 +49,7 @@ func main() {
 		log.Fatal(err)
 	}
 	svc := dynamodb.New(sess)
-	r.Use(CORSMiddleware())
+	// r.Use(CORSMiddleware())	// 關閉跨域
 	// 定義路由
 	r.GET("/url_api/hello", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
