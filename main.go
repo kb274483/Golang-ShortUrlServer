@@ -95,7 +95,7 @@ func generateShortURLHandler(c *gin.Context) {
 		return
 	}
 	// fmt.Println(request.URL)
-	shortURL := "http://13.115.250.182/url_api/" + generateShortURL(request.URL, dynamoDBService)
+	shortURL := "https://brief-url.link/url_api/" + generateShortURL(request.URL, dynamoDBService)
 	c.JSON(http.StatusOK, gin.H{"short_url": shortURL})
 }
 func generateShortURL(originalURL string, svc *dynamodb.DynamoDB) string {
