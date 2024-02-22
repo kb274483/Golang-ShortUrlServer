@@ -20,10 +20,16 @@ import (
 )
 
 // 定義送出的資料結構
-type RequestItem struct {
+type RequestUrlItem struct {
 	ID   string
 	Url  string
 	Date string
+}
+
+// 定義登入資訊
+type LoginData struct {
+	Account  string `json:"account"`
+	Password string `json:"password"`
 }
 
 func main() {
@@ -51,21 +57,29 @@ func main() {
 	svc := dynamodb.New(sess)
 	// r.Use(CORSMiddleware())	// 關閉跨域
 	// 定義路由
+	// 測試用
 	r.GET("/url_api/hello", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
 	})
+	// 轉址
 	r.GET("/url_api/:key", func(c *gin.Context) {
 		key := c.Param("key")
-		result, error := GetItem(key, svc)
+		result, error := GetUrlItem(key, svc)
 		if error != nil {
 			c.JSON(http.StatusOK, gin.H{"error": error.Error()})
 			return
 		}
 		c.Redirect(http.StatusMovedPermanently, result)
 	})
+	// 產生短網址
 	r.POST("/url_api/generate_short_url", func(c *gin.Context) {
 		c.Set("dynamodb", svc)
 		generateShortURLHandler(c)
+	})
+	// 登入
+	r.POST("/url_api/login", func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		loginHandler(c)
 	})
 
 	println(svc)
@@ -114,7 +128,7 @@ func generateShortURL(originalURL string, svc *dynamodb.DynamoDB) string {
 }
 
 // 根據傳入的參數搜尋 DynamoDB
-func GetItem(key string, svc *dynamodb.DynamoDB) (string, error) {
+func GetUrlItem(key string, svc *dynamodb.DynamoDB) (string, error) {
 	search := &dynamodb.GetItemInput{
 		TableName: aws.String("shorturl_service"),
 		Key: map[string]*dynamodb.AttributeValue{
@@ -138,7 +152,7 @@ func GetItem(key string, svc *dynamodb.DynamoDB) (string, error) {
 
 // DynamoDB資料儲存
 func SaveItem(key string, url string, date string, svc *dynamodb.DynamoDB) string {
-	item := RequestItem{
+	item := RequestUrlItem{
 		ID:   key,
 		Url:  url,
 		Date: date,
@@ -158,6 +172,62 @@ func SaveItem(key string, url string, date string, svc *dynamodb.DynamoDB) strin
 		os.Exit(1)
 	}
 	return "Success"
+}
+
+// 登入handler
+func loginHandler(c *gin.Context) {
+	// 接收登入的POST參數
+	var userLogin LoginData
+	if err := c.BindJSON(&userLogin); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	Account := userLogin.Account
+	Password := userLogin.Password
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	checkPassword, error := getUserDataList(Account, dynamoDBService)
+	if error != nil {
+		c.JSON(http.StatusOK, gin.H{"error": error.Error()})
+		return
+	}
+	if checkPassword == Password {
+		c.JSON(http.StatusOK, gin.H{"msg": "login success"})
+		return
+	} else {
+		c.JSON(401, gin.H{"error": "login fail"})
+		return
+	}
+}
+
+// 取得User資料表
+func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
+	search := &dynamodb.GetItemInput{
+		TableName: aws.String("user_data"),
+		Key: map[string]*dynamodb.AttributeValue{
+			"Account": {
+				S: aws.String(Account),
+			},
+		},
+	}
+	result, err := svc.GetItem(search)
+	if err != nil {
+		log.Fatal(err)
+	}
+	item, ok := result.Item["Password"]
+	if !ok {
+		return "", errors.New("password does not exist")
+	}
+	password := aws.StringValue(item.S)
+	return password, nil
 }
 
 // 本地端跨域處理
