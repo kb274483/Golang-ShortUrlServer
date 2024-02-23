@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // 定義送出的資料結構
@@ -30,6 +31,12 @@ type RequestUrlItem struct {
 type LoginData struct {
 	Account  string `json:"account"`
 	Password string `json:"password"`
+}
+
+// 建立會員資訊
+type CreateMember struct {
+	Account  string
+	Password string
 }
 
 func main() {
@@ -81,8 +88,11 @@ func main() {
 		c.Set("dynamodb", svc)
 		loginHandler(c)
 	})
-
-	println(svc)
+	// 建立會員
+	r.POST("/url_api/create_member", func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		createMember(c)
+	})
 	// 啟動服務
 	port := ":8080"
 	log.Fatal(r.Run(port))
@@ -127,7 +137,7 @@ func generateShortURL(originalURL string, svc *dynamodb.DynamoDB) string {
 	return shortURLCode
 }
 
-// 根據傳入的參數搜尋 DynamoDB
+// 根據傳入的短網址參數搜尋 DynamoDB
 func GetUrlItem(key string, svc *dynamodb.DynamoDB) (string, error) {
 	search := &dynamodb.GetItemInput{
 		TableName: aws.String("shorturl_service"),
@@ -199,17 +209,23 @@ func loginHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": error.Error()})
 		return
 	}
-	if checkPassword == Password {
-		c.JSON(http.StatusOK, gin.H{"msg": "login success"})
+	if checkPassword == "does not exist" {
+		c.JSON(500, gin.H{"error": "ERROR"})
+		return
+	}
+	err := bcrypt.CompareHashAndPassword([]byte(checkPassword), []byte(Password))
+	if err != nil {
+		c.JSON(401, gin.H{"error": "login fail"})
 		return
 	} else {
-		c.JSON(401, gin.H{"error": "login fail"})
+		c.JSON(http.StatusOK, gin.H{"msg": "login success"})
 		return
 	}
 }
 
 // 取得User資料表
 func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
+	// 透過帳號去搜尋是否有符合的項目
 	search := &dynamodb.GetItemInput{
 		TableName: aws.String("user_data"),
 		Key: map[string]*dynamodb.AttributeValue{
@@ -224,10 +240,78 @@ func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
 	}
 	item, ok := result.Item["Password"]
 	if !ok {
-		return "", errors.New("password does not exist")
+		return "does not exist", nil
 	}
 	password := aws.StringValue(item.S)
 	return password, nil
+}
+
+// 建立新會員
+func createMember(c *gin.Context) {
+	// 接收會員POST參數
+	var userLogin LoginData
+	if err := c.BindJSON(&userLogin); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	Account := userLogin.Account
+	Password := userLogin.Password
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	// 確認帳號是否存在
+	checkAccount, error := getUserDataList(Account, dynamoDBService)
+	if error != nil {
+		c.JSON(500, gin.H{"error": error.Error()})
+		return
+	}
+	// 帳號不存在 則為密碼作加密
+	if checkAccount == "does not exist" {
+		encrypted := []byte(Password)
+		hashedPassword, err := bcrypt.GenerateFromPassword(encrypted, bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(500, gin.H{"error": error.Error()})
+			return
+		}
+		saveStatus := saveMemberData(Account, string(hashedPassword), dynamoDBService)
+		if saveStatus == "Success" {
+			c.JSON(http.StatusOK, gin.H{"msg": "member create success"})
+			return
+		}
+	} else {
+		c.JSON(403, gin.H{"error": "this account already exist"})
+		return
+	}
+}
+
+// 儲存新建的會員資料進資料庫
+func saveMemberData(account string, password string, svc *dynamodb.DynamoDB) string {
+	item := CreateMember{
+		Account:  account,
+		Password: password,
+	}
+	av, err := dynamodbattribute.MarshalMap(item)
+	if err != nil {
+		fmt.Println("Error", err.Error())
+		os.Exit(1)
+	}
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String("user_data"),
+	}
+	_, err = svc.PutItem(input)
+	if err != nil {
+		fmt.Println("SaveError", err.Error())
+		os.Exit(1)
+	}
+	return "Success"
 }
 
 // 本地端跨域處理
