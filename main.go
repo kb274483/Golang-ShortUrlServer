@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -15,7 +17,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -25,6 +29,7 @@ type RequestUrlItem struct {
 	ID   string
 	Url  string
 	Date string
+	User string
 }
 
 // 定義登入資訊
@@ -37,6 +42,58 @@ type LoginData struct {
 type CreateMember struct {
 	Account  string
 	Password string
+}
+
+// 取得會員歷史紀錄
+type memberHistoryReq struct {
+	Account string `json:"user"`
+}
+
+// 產生JWT隨機密鑰
+func generateSecretKey(length int) ([]byte, error) {
+	bytes := make([]byte, length)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
+}
+
+// 驗證JWT憑證是否正確有效
+func validateToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		auth := c.GetHeader("Authorization")
+		splitArr := strings.Split(auth, " ")
+		tokenString := ""
+		if len(splitArr) >= 2 {
+			tokenString = splitArr[1]
+		}
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.NewValidationError("unexpected signing method", jwt.ValidationErrorSignatureInvalid)
+			}
+			return JWTKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			c.Set("tokenValid", false)
+		} else {
+			c.Set("tokenValid", true)
+		}
+
+		c.Next()
+	}
+}
+
+// 產生JWT隨機密鑰
+var JWTKey []byte
+
+func init() {
+	var err error
+	JWTKey, err = generateSecretKey(32)
+	if err != nil {
+		log.Fatalf("Failed to generate JWT secret key: %v", err)
+	}
 }
 
 func main() {
@@ -62,7 +119,8 @@ func main() {
 		log.Fatal(err)
 	}
 	svc := dynamodb.New(sess)
-	// r.Use(CORSMiddleware())	// 關閉跨域
+
+	r.Use(CORSMiddleware()) // 關閉跨域
 	// 定義路由
 	// 測試用
 	r.GET("/url_api/hello", func(c *gin.Context) {
@@ -79,9 +137,15 @@ func main() {
 		c.Redirect(http.StatusMovedPermanently, result)
 	})
 	// 產生短網址
-	r.POST("/url_api/generate_short_url", func(c *gin.Context) {
+	r.POST("/url_api/generate_short_url", validateToken(), func(c *gin.Context) {
 		c.Set("dynamodb", svc)
-		generateShortURLHandler(c)
+		auth := c.GetHeader("Authorization")
+		splitArr := strings.Split(auth, " ")
+		token := ""
+		if len(splitArr) >= 2 {
+			token = splitArr[1]
+		}
+		generateShortURLHandler(c, token)
 	})
 	// 登入
 	r.POST("/url_api/login", func(c *gin.Context) {
@@ -93,16 +157,30 @@ func main() {
 		c.Set("dynamodb", svc)
 		createMember(c)
 	})
+	// 取得會員歷史紀錄
+	r.POST("/url_api/member_history", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		queryMemberHistory(c)
+	})
 	// 啟動服務
 	port := ":8080"
 	log.Fatal(r.Run(port))
 }
 
 // 短網址Handler
-func generateShortURLHandler(c *gin.Context) {
+func generateShortURLHandler(c *gin.Context, token string) {
 	// 接收POST參數
 	var request struct {
-		URL string `json:"url" binding:"required"`
+		URL  string `json:"url" binding:"required"`
+		User string `json:"user"`
+	}
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -118,11 +196,10 @@ func generateShortURLHandler(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
 		return
 	}
-	// fmt.Println(request.URL)
-	shortURL := "https://brief-url.link/url_api/" + generateShortURL(request.URL, dynamoDBService)
+	shortURL := "https://brief-url.link/url_api/" + generateShortURL(request.URL, request.User, dynamoDBService, token, isLogin)
 	c.JSON(http.StatusOK, gin.H{"short_url": shortURL})
 }
-func generateShortURL(originalURL string, svc *dynamodb.DynamoDB) string {
+func generateShortURL(originalURL string, user string, svc *dynamodb.DynamoDB, token string, loginStatus bool) string {
 	// 記錄時間
 	currentTime := time.Now()
 	formattedDate := currentTime.Format("2006/01/02")
@@ -133,7 +210,7 @@ func generateShortURL(originalURL string, svc *dynamodb.DynamoDB) string {
 	hashString := hex.EncodeToString(hash)
 	shortURLCode := hashString[:6]
 	// 儲存結果到 DynamoDB
-	SaveItem(shortURLCode, originalURL, formattedDate, svc)
+	SaveItem(shortURLCode, originalURL, formattedDate, user, loginStatus, svc)
 	return shortURLCode
 }
 
@@ -161,11 +238,15 @@ func GetUrlItem(key string, svc *dynamodb.DynamoDB) (string, error) {
 }
 
 // DynamoDB資料儲存
-func SaveItem(key string, url string, date string, svc *dynamodb.DynamoDB) string {
+func SaveItem(key string, url string, date string, user string, loginStatus bool, svc *dynamodb.DynamoDB) string {
 	item := RequestUrlItem{
 		ID:   key,
 		Url:  url,
 		Date: date,
+		User: user,
+	}
+	if !loginStatus {
+		item.User = "guest"
 	}
 	av, err := dynamodbattribute.MarshalMap(item)
 	if err != nil {
@@ -210,7 +291,7 @@ func loginHandler(c *gin.Context) {
 		return
 	}
 	if checkPassword == "does not exist" {
-		c.JSON(500, gin.H{"error": "ERROR"})
+		c.JSON(401, gin.H{"error": "login fail"})
 		return
 	}
 	err := bcrypt.CompareHashAndPassword([]byte(checkPassword), []byte(Password))
@@ -218,9 +299,35 @@ func loginHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"error": "login fail"})
 		return
 	} else {
-		c.JSON(http.StatusOK, gin.H{"msg": "login success"})
+		token, err := GenerateJWT(Account)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "something wrong"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"msg":       "login success",
+			"user_name": Account,
+			"token":     token,
+		})
 		return
 	}
+}
+
+// 產生JWT
+func GenerateJWT(userName string) (string, error) {
+	token := jwt.New(jwt.SigningMethodHS256)
+	claims := token.Claims.(jwt.MapClaims)
+
+	claims["authorized"] = true
+	claims["user"] = userName
+	claims["exp"] = time.Now().Add(time.Minute * 60).Unix()
+
+	tokenString, err := token.SignedString(JWTKey)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
 }
 
 // 取得User資料表
@@ -289,6 +396,60 @@ func createMember(c *gin.Context) {
 		c.JSON(403, gin.H{"error": "this account already exist"})
 		return
 	}
+}
+
+// 取得會員歷史紀錄
+func queryMemberHistory(c *gin.Context) {
+	var memberHistoryReq struct {
+		Account string `json:"user"`
+	}
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	if err := c.ShouldBindJSON(&memberHistoryReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	searchKey := expression.Key("User").Equal(expression.Value(memberHistoryReq.Account))
+	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
+	if err != nil {
+		fmt.Println("Got error building expression:", err)
+		return
+	}
+	queryInput := &dynamodb.QueryInput{
+		TableName:                 aws.String("shorturl_service"),
+		IndexName:                 aws.String("User-Date-index"),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		KeyConditionExpression:    expr.KeyCondition(),
+	}
+
+	result, err := dynamoDBService.Query(queryInput)
+	if err != nil {
+		fmt.Println("Query API call failed:", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
 // 儲存新建的會員資料進資料庫
