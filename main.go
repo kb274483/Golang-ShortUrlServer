@@ -45,7 +45,7 @@ type CreateMember struct {
 }
 
 // 取得會員歷史紀錄
-type memberHistoryReq struct {
+type MemberHistoryReq struct {
 	Account string `json:"user"`
 }
 
@@ -400,9 +400,7 @@ func createMember(c *gin.Context) {
 
 // 取得會員歷史紀錄
 func queryMemberHistory(c *gin.Context) {
-	var memberHistoryReq struct {
-		Account string `json:"user"`
-	}
+	var memberHistoryReq MemberHistoryReq
 	value, exists := c.Get("tokenValid")
 	if !exists {
 		return
