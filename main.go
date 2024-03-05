@@ -132,10 +132,10 @@ func main() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GCP_CLIENT_SECRET_ID"),
 		ClientSecret: os.Getenv("GCP_CLIENT_SECRET_KEY"),
-		// RedirectURL:  "http://localhost:8080/url_api/google_call_back",
-		RedirectURL: "http://localhost:9001",
-		Scopes:      []string{"https://www.googleapis.com/auth/userinfo.email"},
-		Endpoint:    google.Endpoint,
+		RedirectURL:  "https://brief-url.link", // 正式環境
+		// RedirectURL: "http://localhost:9001", // 測試環境
+		Scopes:   []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint: google.Endpoint,
 	}
 
 	r.Use(CORSMiddleware()) // 關閉跨域
