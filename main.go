@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,19 @@ var (
 	googleOauthConfig *oauth2.Config
 )
 
+// 產生隨機字串
+func generateRandomString(length int) (string, error) {
+	randomBytes := make([]byte, length)
+
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		return "", err
+	}
+
+	randomString := base64.URLEncoding.EncodeToString(randomBytes)
+	return randomString[:length], nil
+}
+
 // 產生JWT隨機密鑰
 func generateSecretKey(length int) ([]byte, error) {
 	bytes := make([]byte, length)
@@ -96,11 +110,20 @@ func validateToken() gin.HandlerFunc {
 // 產生JWT隨機密鑰
 var JWTKey []byte
 
+// 給google的隨機字串
+var googleStateStr string
+
 func init() {
 	var err error
 	JWTKey, err = generateSecretKey(32)
 	if err != nil {
 		log.Fatalf("Failed to generate JWT secret key: %v", err)
+	}
+	googleStateStr, err = generateRandomString(10)
+
+	if err != nil {
+		fmt.Println("生成隨機字串時發生錯誤:", err)
+		return
 	}
 }
 
@@ -172,7 +195,7 @@ func main() {
 	})
 	// 第三方登入
 	r.GET("/url_api/google_login", func(c *gin.Context) {
-		url := googleOauthConfig.AuthCodeURL("state")
+		url := googleOauthConfig.AuthCodeURL(googleStateStr)
 		c.JSON(http.StatusOK, gin.H{"redirectUrl": url})
 	})
 	// Google 回調
@@ -365,6 +388,12 @@ func loginHandler(c *gin.Context) {
 
 // google 回調
 func handlerGoogleCallBack(c *gin.Context) map[string]interface{} {
+	// 檢查隨機字串的正確性
+	state := c.Query("state")
+	if state != googleStateStr {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "state error"})
+		return nil
+	}
 	// 得到google回應的授權碼
 	code := c.Query("code")
 	// 使用授權碼向google取得token
