@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -22,6 +24,8 @@ import (
 	"github.com/golang-jwt/jwt"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // 定義送出的資料結構
@@ -48,6 +52,10 @@ type CreateMember struct {
 type MemberHistoryReq struct {
 	Account string `json:"user"`
 }
+
+var (
+	googleOauthConfig *oauth2.Config
+)
 
 // 產生JWT隨機密鑰
 func generateSecretKey(length int) ([]byte, error) {
@@ -120,6 +128,16 @@ func main() {
 	}
 	svc := dynamodb.New(sess)
 
+	// Google Config
+	googleOauthConfig = &oauth2.Config{
+		ClientID:     os.Getenv("GCP_CLIENT_SECRET_ID"),
+		ClientSecret: os.Getenv("GCP_CLIENT_SECRET_KEY"),
+		// RedirectURL:  "http://localhost:8080/url_api/google_call_back",
+		RedirectURL: "http://localhost:9001",
+		Scopes:      []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint:    google.Endpoint,
+	}
+
 	r.Use(CORSMiddleware()) // 關閉跨域
 	// 定義路由
 	// 測試用
@@ -151,6 +169,38 @@ func main() {
 	r.POST("/url_api/login", func(c *gin.Context) {
 		c.Set("dynamodb", svc)
 		loginHandler(c)
+	})
+	// 第三方登入
+	r.GET("/url_api/google_login", func(c *gin.Context) {
+		url := googleOauthConfig.AuthCodeURL("state")
+		c.JSON(http.StatusOK, gin.H{"redirectUrl": url})
+	})
+	// Google 回調
+	r.GET("/url_api/google_call_back", func(c *gin.Context) {
+		userData := handlerGoogleCallBack(c)
+		if userData != nil {
+			userEmail, emailExist := userData["email"].(string)
+			if !emailExist {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Email not found in userData"})
+				return
+			}
+			splitEmail := strings.Split(userEmail, "@")
+			if len(splitEmail) > 0 {
+				account := splitEmail[0]
+				token, err := GenerateJWT(account)
+				if err != nil {
+					c.JSON(500, gin.H{"error": "something wrong"})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{
+					"msg":       "login success",
+					"user_name": account,
+					"token":     token,
+				})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Email split error"})
+			}
+		}
 	})
 	// 建立會員
 	r.POST("/url_api/create_member", func(c *gin.Context) {
@@ -311,6 +361,41 @@ func loginHandler(c *gin.Context) {
 		})
 		return
 	}
+}
+
+// google 回調
+func handlerGoogleCallBack(c *gin.Context) map[string]interface{} {
+	// 得到google回應的授權碼
+	code := c.Query("code")
+	// 使用授權碼向google取得token
+	token, err := googleOauthConfig.Exchange(context.Background(), code)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token get fail"})
+		return nil
+	}
+	// 再使用token去跟google的資源伺服器取得用戶資訊
+	googleUserData, err := getGoogleUserData(token)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "something wrong"})
+		return nil
+	}
+	return googleUserData
+}
+
+func getGoogleUserData(token *oauth2.Token) (map[string]interface{}, error) {
+	client := googleOauthConfig.Client(context.Background(), token)
+	response, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	var userInfo map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&userInfo); err != nil {
+		return nil, err
+	}
+
+	return userInfo, nil
 }
 
 // 產生JWT
