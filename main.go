@@ -161,7 +161,7 @@ func main() {
 		Endpoint: google.Endpoint,
 	}
 
-	r.Use(CORSMiddleware()) // 關閉跨域
+	// r.Use(CORSMiddleware()) // 關閉跨域
 	// 定義路由
 	// 測試用
 	r.GET("/url_api/hello", func(c *gin.Context) {
