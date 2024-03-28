@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +53,34 @@ type CreateMember struct {
 // 取得會員歷史紀錄
 type MemberHistoryReq struct {
 	Account string `json:"user"`
+}
+
+// 定義前端傳來的行程資訊
+type itineraryData struct {
+	Timestamp int    `json:"timestamp"`
+	Account   string `json:"account"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Date      string `json:"date"`
+	Time      string `json:"time"`
+	Status    bool   `json:"status"`
+}
+
+// 定義要存入資料庫的行程
+type saveItineraryData struct {
+	Timestamp int
+	Account   string
+	Title     string
+	Content   string
+	Date      string
+	Time      string
+	Status    bool
+}
+
+// 定義前端取行程資料的條件
+type itineraryReq struct {
+	Account string `json:"account"`
+	Date    string `json:"date"`
 }
 
 var (
@@ -155,13 +184,13 @@ func main() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GCP_CLIENT_SECRET_ID"),
 		ClientSecret: os.Getenv("GCP_CLIENT_SECRET_KEY"),
-		RedirectURL:  "https://brief-url.link", // 正式環境
-		// RedirectURL: "http://localhost:9001", // 測試環境
-		Scopes:   []string{"https://www.googleapis.com/auth/userinfo.email"},
-		Endpoint: google.Endpoint,
+		// RedirectURL:  "https://brief-url.link", // 正式環境
+		RedirectURL: "http://localhost:9001", // 測試環境
+		Scopes:      []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint:    google.Endpoint,
 	}
 
-	// r.Use(CORSMiddleware()) // 關閉跨域
+	r.Use(CORSMiddleware()) // 關閉跨域
 	// 定義路由
 	// 測試用
 	r.GET("/url_api/hello", func(c *gin.Context) {
@@ -234,6 +263,26 @@ func main() {
 	r.POST("/url_api/member_history", validateToken(), func(c *gin.Context) {
 		c.Set("dynamodb", svc)
 		queryMemberHistory(c)
+	})
+	// 建立行程事件
+	r.POST("/url_api/add_itinerary", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		addItinerary(c)
+	})
+	// 取得當天行程
+	r.POST("/url_api/get_itinerary", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		getItinerary(c)
+	})
+	// 更新事件
+	r.POST("/url_api/update_itinerary", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		updeateItinerary(c)
+	})
+	// 刪除事件
+	r.POST("/url_api/delete_itinerary", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		deleteItinerary(c)
 	})
 	// 啟動服務
 	port := ":8080"
@@ -557,7 +606,7 @@ func queryMemberHistory(c *gin.Context) {
 
 	result, err := dynamoDBService.Query(queryInput)
 	if err != nil {
-		fmt.Println("Query API call failed:", err)
+		c.JSON(http.StatusOK, gin.H{"data": nil})
 		return
 	}
 
@@ -585,6 +634,256 @@ func saveMemberData(account string, password string, svc *dynamodb.DynamoDB) str
 		os.Exit(1)
 	}
 	return "Success"
+}
+
+// 建立新行程
+func addItinerary(c *gin.Context) {
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	var newEvent itineraryData
+	if err := c.BindJSON(&newEvent); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// 接收前端傳來的變數
+	Timestamp := newEvent.Timestamp
+	Account := newEvent.Account
+	Title := newEvent.Title
+	Content := newEvent.Content
+	Date := newEvent.Date
+	Time := newEvent.Time
+	Status := newEvent.Status
+
+	// 資料庫
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+
+	saveStatus := saveItineraryToDB(Timestamp, Account, Title, Content, Date, Time, Status, dynamoDBService)
+	if saveStatus == "Success" {
+		c.JSON(http.StatusOK, gin.H{"msg": "Itinerary create success"})
+		return
+	} else {
+		c.JSON(500, gin.H{"error": "Save itinerary data error"})
+		return
+	}
+}
+
+// 將行程存入資料庫
+func saveItineraryToDB(timestamp int, account string, title string, content string, date string, time string, status bool, svc *dynamodb.DynamoDB) string {
+	item := saveItineraryData{
+		Timestamp: timestamp,
+		Account:   account,
+		Title:     title,
+		Content:   content,
+		Date:      date,
+		Time:      time,
+		Status:    status,
+	}
+	av, err := dynamodbattribute.MarshalMap(item)
+	if err != nil {
+		fmt.Println("Error", err.Error())
+		os.Exit(1)
+	}
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String("daily_itinerary"),
+	}
+	_, err = svc.PutItem(input)
+	if err != nil {
+		fmt.Println("SaveError", err.Error())
+		os.Exit(1)
+	}
+	return "Success"
+}
+
+// 取得當天行程
+func getItinerary(c *gin.Context) {
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	var itineraryReqData itineraryReq
+	if err := c.ShouldBindJSON(&itineraryReqData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	searchKey := expression.Key("Account").Equal(expression.Value(itineraryReqData.Account)).And(expression.Key("Date").Equal(expression.Value(itineraryReqData.Date)))
+	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
+	if err != nil {
+		fmt.Println("Got error building expression:", err)
+		return
+	}
+	queryInput := &dynamodb.QueryInput{
+		TableName:                 aws.String("daily_itinerary"),
+		IndexName:                 aws.String("Account-Date-index"),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		KeyConditionExpression:    expr.KeyCondition(),
+	}
+
+	result, err := dynamoDBService.Query(queryInput)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"data": nil})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// 更新行程
+func updeateItinerary(c *gin.Context) {
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	var updateEvent itineraryData
+	if err := c.BindJSON(&updateEvent); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	key := map[string]*dynamodb.AttributeValue{
+		"Timestamp": {
+			N: aws.String(strconv.Itoa(updateEvent.Timestamp)),
+		},
+	}
+	updateExpr := "SET #title = :newTitle, #content = :newContent ,#time = :newTime ,#status = :newStatus "
+	exprAttrNames := map[string]*string{
+		"#title":   aws.String("Title"),
+		"#content": aws.String("Content"),
+		"#time":    aws.String("Time"),
+		"#status":  aws.String("Status"),
+	}
+
+	exprAttrValues := map[string]*dynamodb.AttributeValue{
+		":newTitle": {
+			S: aws.String(updateEvent.Title),
+		},
+		":newContent": {
+			S: aws.String(updateEvent.Content),
+		},
+		":newTime": {
+			S: aws.String(updateEvent.Time),
+		},
+		":newStatus": {
+			BOOL: aws.Bool(updateEvent.Status),
+		},
+	}
+
+	input := &dynamodb.UpdateItemInput{
+		TableName:                 aws.String("daily_itinerary"),
+		Key:                       key,
+		UpdateExpression:          aws.String(updateExpr),
+		ExpressionAttributeNames:  exprAttrNames,
+		ExpressionAttributeValues: exprAttrValues,
+		ReturnValues:              aws.String("UPDATED_NEW"),
+	}
+	result, err := dynamoDBService.UpdateItem(input)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Something wrong!"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// 刪除行程
+func deleteItinerary(c *gin.Context) {
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	var deleteEvent itineraryData
+	if err := c.BindJSON(&deleteEvent); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	key := map[string]*dynamodb.AttributeValue{
+		"Timestamp": {
+			N: aws.String(strconv.Itoa(deleteEvent.Timestamp)),
+		},
+	}
+
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String("daily_itinerary"),
+		Key:       key,
+	}
+	_, err := dynamoDBService.DeleteItem(input)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Something wrong!"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"msg": "Delete Successfully"})
 }
 
 // 本地端跨域處理
