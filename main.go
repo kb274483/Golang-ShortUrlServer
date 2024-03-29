@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SherClockHolmes/webpush-go"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -25,6 +26,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -86,6 +88,53 @@ type itineraryReq struct {
 var (
 	googleOauthConfig *oauth2.Config
 )
+
+// VAPID鑰匙
+var (
+	vapidPublicKey  string
+	vapidPrivateKey string
+)
+
+// 訂閱資訊
+type SubscriptionData struct {
+	Account      string `json:"account"`
+	Subscription struct {
+		Endpoint string `json:"endpoint"`
+		Keys     struct {
+			P256dh string `json:"p256dh"`
+			Auth   string `json:"auth"`
+		} `json:"keys"`
+	} `json:"subscription"`
+}
+
+// 存入資料庫的訂閱結構
+type SaveSubscriptionData struct {
+	Account      string
+	Subscription struct {
+		Endpoint string
+		Keys     struct {
+			P256dh string
+			Auth   string
+		}
+	}
+}
+
+type sendSub struct {
+	Subscription struct {
+		Endpoint string
+		Keys     struct {
+			P256dh string
+			Auth   string
+		}
+	}
+}
+
+// 要傳送的訊息
+type NotiPayload struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Icon  string `json:"icon"`
+}
 
 // 產生隨機字串
 func generateRandomString(length int) (string, error) {
@@ -154,6 +203,12 @@ func init() {
 		fmt.Println("生成隨機字串時發生錯誤:", err)
 		return
 	}
+
+	// 產生VAPID KEY
+	vapidPrivateKey, vapidPublicKey, err = webpush.GenerateVAPIDKeys()
+	if err != nil {
+		log.Fatalf("Failed to generate VAPID keys: %v", err)
+	}
 }
 
 func main() {
@@ -179,6 +234,15 @@ func main() {
 		log.Fatal(err)
 	}
 	svc := dynamodb.New(sess)
+
+	// Cron Mission
+	c := cron.New()
+	// 每個整點和30分執行
+	// 0,30
+	_ = c.AddFunc("0,30 * * * *", func() {
+		checkItinerary(svc)
+	})
+	c.Start()
 
 	// Google Config
 	googleOauthConfig = &oauth2.Config{
@@ -283,6 +347,27 @@ func main() {
 	r.POST("/url_api/delete_itinerary", validateToken(), func(c *gin.Context) {
 		c.Set("dynamodb", svc)
 		deleteItinerary(c)
+	})
+	// 取得VAPID KEY
+	r.GET("/url_api/get_vapid_key", validateToken(), func(c *gin.Context) {
+		value, exists := c.Get("tokenValid")
+		if !exists {
+			return
+		}
+		isLogin, ok := value.(bool)
+		if !ok {
+			return
+		}
+		if !isLogin {
+			c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"publicKey": vapidPublicKey})
+	})
+	// 訂閱
+	r.POST("/url_api/subscribe", validateToken(), func(c *gin.Context) {
+		c.Set("dynamodb", svc)
+		subscribeNotification(c)
 	})
 	// 啟動服務
 	port := ":8080"
@@ -884,6 +969,173 @@ func deleteItinerary(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"msg": "Delete Successfully"})
+}
+
+// 訂閱
+func subscribeNotification(c *gin.Context) {
+	value, exists := c.Get("tokenValid")
+	if !exists {
+		return
+	}
+	isLogin, ok := value.(bool)
+	if !ok {
+		return
+	}
+	if !isLogin {
+		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
+		return
+	}
+	svc, exists := c.Get("dynamodb")
+	if !exists {
+		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+		return
+	}
+	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
+		return
+	}
+	var subscription SubscriptionData
+	if err := c.BindJSON(&subscription); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid subscription format"})
+		return
+	}
+	item := SaveSubscriptionData{
+		Account: subscription.Account,
+		Subscription: struct {
+			Endpoint string
+			Keys     struct {
+				P256dh string
+				Auth   string
+			}
+		}(subscription.Subscription),
+	}
+	av, err := dynamodbattribute.MarshalMap(item)
+	if err != nil {
+		fmt.Println("Error", err.Error())
+		os.Exit(1)
+	}
+
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String("subscription"),
+	}
+	_, err = dynamoDBService.PutItem(input)
+	if err != nil {
+		fmt.Println("SaveError", err.Error())
+		os.Exit(1)
+	}
+	c.JSON(http.StatusOK, gin.H{"msg": "Subscribe Successfully"})
+}
+
+// 搜尋行程資料表
+func checkItinerary(svc *dynamodb.DynamoDB) {
+	if svc == nil {
+		fmt.Println("DB Error: svc is nil")
+		return
+	}
+	// 建立Payload
+	payload := NotiPayload{
+		Title: "Trip reminder",
+		Body:  "Are you ready to start?",
+		Icon:  "https://brief-url.link/favicon.ico",
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Fatalf("Failed to encode payload: %v", err)
+	}
+	now := time.Now()
+	// 處理時間成字串格式
+	dateStr := now.Format("2006/01/02")
+	startTimeStr := now.Format("15:04")
+	endTime := now.Add(30 * time.Minute)
+	endTimeStr := endTime.Format("15:04")
+
+	searchKey := expression.Key("Date").Equal(expression.Value(dateStr)).And(expression.Key("Time").Between((expression.Value(startTimeStr)), (expression.Value(endTimeStr))))
+	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
+	if err != nil {
+		fmt.Println("Got error building expression:", err)
+		return
+	}
+	queryInput := &dynamodb.QueryInput{
+		TableName:                 aws.String("daily_itinerary"),
+		IndexName:                 aws.String("Date-Time-index"),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		KeyConditionExpression:    expr.KeyCondition(),
+	}
+
+	result, err := svc.Query(queryInput)
+	if err != nil {
+		fmt.Println("Query failed:", err)
+		return
+	}
+	var accounts []string
+	for _, item := range result.Items {
+		if item["Account"] != nil && item["Account"].S != nil {
+			acc := *item["Account"].S
+			accounts = append(accounts, acc)
+		}
+	}
+	// 依據剛剛取出的Account去撈 subscription 資料表
+	for _, acc := range accounts {
+		searchSub := &dynamodb.GetItemInput{
+			TableName: aws.String("subscription"),
+			Key: map[string]*dynamodb.AttributeValue{
+				"Account": {
+					S: aws.String(acc),
+				},
+			},
+		}
+		res, err := svc.GetItem(searchSub)
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
+		item := res.Item["Subscription"].M
+		// item資料結構轉換
+		var subscription sendSub
+		if val, ok := item["Endpoint"]; ok && val.S != nil {
+			subscription.Subscription.Endpoint = *val.S
+		}
+
+		if keys, ok := item["Keys"]; ok && keys.M != nil {
+			if auth, ok := keys.M["Auth"]; ok && auth.S != nil {
+				subscription.Subscription.Keys.Auth = *auth.S
+			}
+			if p256dh, ok := keys.M["P256dh"]; ok && p256dh.S != nil {
+				subscription.Subscription.Keys.P256dh = *p256dh.S
+			}
+		}
+		sendNotification(subscription, payloadBytes)
+	}
+}
+
+// 發送訊息
+func sendNotification(subscribe sendSub, payload []byte) error {
+	s := &webpush.Subscription{
+		Endpoint: subscribe.Subscription.Endpoint,
+		Keys: webpush.Keys{
+			P256dh: subscribe.Subscription.Keys.P256dh,
+			Auth:   subscribe.Subscription.Keys.Auth,
+		},
+	}
+	resp, err := webpush.SendNotification(payload, s, &webpush.Options{
+		Subscriber:      "kb274483@gmail.com",
+		VAPIDPublicKey:  vapidPublicKey,
+		VAPIDPrivateKey: vapidPrivateKey,
+		TTL:             60,
+	})
+
+	if err != nil {
+		log.Printf("Failed to send notification: %v", err)
+		return err
+	}
+
+	defer resp.Body.Close()
+	log.Printf("Successfully sent notification: %v", resp.Status)
+	fmt.Println("SEND")
+	return nil
 }
 
 // 本地端跨域處理
