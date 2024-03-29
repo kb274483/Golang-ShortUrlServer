@@ -239,7 +239,7 @@ func main() {
 	c := cron.New()
 	// 每個整點和30分執行
 	// 0,30
-	_ = c.AddFunc("0,30 * * * *", func() {
+	_ = c.AddFunc("* * 1 * *", func() {
 		checkItinerary(svc)
 	})
 	c.Start()
