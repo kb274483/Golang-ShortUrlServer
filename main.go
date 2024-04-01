@@ -1042,7 +1042,7 @@ func checkItinerary(svc *dynamodb.DynamoDB) {
 	payload := NotiPayload{
 		Title: "Trip reminder",
 		Body:  "Are you ready to start?",
-		Icon:  "https://brief-url.link/favicon.ico",
+		Icon:  "https://cdn-icons-png.flaticon.com/512/4906/4906333.png",
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
