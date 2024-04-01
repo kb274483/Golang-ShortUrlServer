@@ -1045,10 +1045,17 @@ func checkItinerary(svc *dynamodb.DynamoDB) {
 		log.Fatalf("Failed to encode payload: %v", err)
 	}
 	now := time.Now()
+	// 載入時區
+	loc, err := time.LoadLocation("Asia/Taipei")
+	if err != nil {
+		fmt.Println("Error loading location: ", err)
+		return
+	}
+	twTime := now.In(loc)
 	// 處理時間成字串格式
-	dateStr := now.Format("2006/01/02")
-	startTimeStr := now.Format("15:04")
-	endTime := now.Add(30 * time.Minute)
+	dateStr := twTime.Format("2006/01/02")
+	startTimeStr := twTime.Format("15:04")
+	endTime := twTime.Add(30 * time.Minute)
 	endTimeStr := endTime.Format("15:04")
 
 	searchKey := expression.Key("Date").Equal(expression.Value(dateStr)).And(expression.Key("Time").Between((expression.Value(startTimeStr)), (expression.Value(endTimeStr))))
