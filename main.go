@@ -26,7 +26,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
 	"github.com/joho/godotenv"
-	"github.com/robfig/cron"
+	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -239,9 +239,13 @@ func main() {
 	c := cron.New()
 	// 每個整點和30分執行
 	// 0,30
-	_ = c.AddFunc("0,30 * * * *", func() {
+	_, err = c.AddFunc("0,30 * * * *", func() {
 		checkItinerary(svc)
 	})
+	if err != nil {
+		fmt.Println("cron unset", err)
+		return
+	}
 	c.Start()
 
 	// Google Config
