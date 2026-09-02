@@ -40,6 +40,16 @@ type RequestUrlItem struct {
 	User string
 }
 
+var ErrShortURLNotFound = errors.New("short URL not found")
+
+type shortURLReader interface {
+	GetItem(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
+}
+
+type shortURLWriter interface {
+	PutItem(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
+}
+
 // 定義登入資訊
 type LoginData struct {
 	Account  string `json:"account"`
@@ -289,25 +299,16 @@ func registerShortURLRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
 	})
 	// 轉址
-	r.GET("/url_api/:key", func(c *gin.Context) {
-		key := c.Param("key")
-		result, error := GetUrlItem(key, svc)
-		if error != nil {
-			c.JSON(http.StatusOK, gin.H{"error": error.Error()})
-			return
-		}
-		c.Redirect(http.StatusMovedPermanently, result)
-	})
+	r.GET("/url_api/:key", resolveShortURLHandler(svc))
 	// 產生短網址
 	r.POST("/url_api/generate_short_url", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
 		auth := c.GetHeader("Authorization")
 		splitArr := strings.Split(auth, " ")
 		token := ""
 		if len(splitArr) >= 2 {
 			token = splitArr[1]
 		}
-		generateShortURLHandler(c, token)
+		generateShortURLHandler(c, token, svc)
 	})
 }
 
@@ -409,7 +410,7 @@ func registerNotificationRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 }
 
 // 短網址Handler
-func generateShortURLHandler(c *gin.Context, token string) {
+func generateShortURLHandler(c *gin.Context, token string, store shortURLWriter) {
 	// 接收POST參數
 	var request struct {
 		URL  string `json:"url" binding:"required"`
@@ -427,20 +428,16 @@ func generateShortURLHandler(c *gin.Context, token string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	svc, exists := c.Get("dynamodb")
-	if !exists {
-		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+	shortURLCode, err := generateShortURL(request.URL, request.User, store, token, isLogin)
+	if err != nil {
+		log.Printf("create short URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create short URL"})
 		return
 	}
-	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
-	if !ok {
-		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
-		return
-	}
-	shortURL := "https://brief-url.link/url_api/" + generateShortURL(request.URL, request.User, dynamoDBService, token, isLogin)
+	shortURL := "https://brief-url.link/url_api/" + shortURLCode
 	c.JSON(http.StatusOK, gin.H{"short_url": shortURL})
 }
-func generateShortURL(originalURL string, user string, svc *dynamodb.DynamoDB, token string, loginStatus bool) string {
+func generateShortURL(originalURL string, user string, svc shortURLWriter, token string, loginStatus bool) (string, error) {
 	// 記錄時間
 	currentTime := time.Now()
 	formattedDate := currentTime.Format("2006/01/02")
@@ -451,12 +448,14 @@ func generateShortURL(originalURL string, user string, svc *dynamodb.DynamoDB, t
 	hashString := hex.EncodeToString(hash)
 	shortURLCode := hashString[:6]
 	// 儲存結果到 DynamoDB
-	SaveItem(shortURLCode, originalURL, formattedDate, user, loginStatus, svc)
-	return shortURLCode
+	if err := SaveItem(shortURLCode, originalURL, formattedDate, user, loginStatus, svc); err != nil {
+		return "", err
+	}
+	return shortURLCode, nil
 }
 
 // 根據傳入的短網址參數搜尋 DynamoDB
-func GetUrlItem(key string, svc *dynamodb.DynamoDB) (string, error) {
+func GetUrlItem(key string, svc shortURLReader) (string, error) {
 	search := &dynamodb.GetItemInput{
 		TableName: aws.String("shorturl_service"),
 		Key: map[string]*dynamodb.AttributeValue{
@@ -468,18 +467,38 @@ func GetUrlItem(key string, svc *dynamodb.DynamoDB) (string, error) {
 	// 使用 GetItem 方法取得項目
 	result, err := svc.GetItem(search)
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("get short URL %q: %w", key, err)
+	}
+	if result == nil {
+		return "", ErrShortURLNotFound
 	}
 	item, ok := result.Item["Url"]
-	if !ok {
-		return "", errors.New("item not found in dynamodb result")
+	if !ok || item == nil || item.S == nil {
+		return "", ErrShortURLNotFound
 	}
 	originalURL := aws.StringValue(item.S)
 	return originalURL, nil
 }
 
+func resolveShortURLHandler(store shortURLReader) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.Param("key")
+		destination, err := GetUrlItem(key, store)
+		if errors.Is(err, ErrShortURLNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "short URL not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("resolve short URL %q: %v", key, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve short URL"})
+			return
+		}
+		c.Redirect(http.StatusMovedPermanently, destination)
+	}
+}
+
 // DynamoDB資料儲存
-func SaveItem(key string, url string, date string, user string, loginStatus bool, svc *dynamodb.DynamoDB) string {
+func SaveItem(key string, url string, date string, user string, loginStatus bool, svc shortURLWriter) error {
 	item := RequestUrlItem{
 		ID:   key,
 		Url:  url,
@@ -491,8 +510,7 @@ func SaveItem(key string, url string, date string, user string, loginStatus bool
 	}
 	av, err := dynamodbattribute.MarshalMap(item)
 	if err != nil {
-		fmt.Println("Error", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("marshal short URL item: %w", err)
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -500,10 +518,9 @@ func SaveItem(key string, url string, date string, user string, loginStatus bool
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
-		fmt.Println("Error", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("save short URL item: %w", err)
 	}
-	return "Success"
+	return nil
 }
 
 // 登入handler
