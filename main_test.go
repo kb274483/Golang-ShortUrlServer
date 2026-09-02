@@ -34,6 +34,19 @@ type fakeShortURLStore struct {
 	putItem func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
 }
 
+type fakeItineraryReminderStore struct {
+	query   func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	getItem func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
+}
+
+func (store *fakeItineraryReminderStore) Query(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+	return store.query(input)
+}
+
+func (store *fakeItineraryReminderStore) GetItem(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+	return store.getItem(input)
+}
+
 func (store fakeShortURLStore) GetItem(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 	return store.getItem(input)
 }
@@ -149,5 +162,185 @@ func TestGenerateShortURLReturnsInternalServerErrorWhenWriteFails(t *testing.T) 
 
 	if response.Body.String() != `{"error":"failed to create short URL"}` {
 		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to create short URL"}`)
+	}
+}
+
+func TestLoginReturnsInternalServerErrorWhenUserLookupFails(t *testing.T) {
+	store := fakeShortURLStore{
+		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return nil, errors.New("DynamoDB unavailable")
+		},
+	}
+	router := gin.New()
+	router.POST("/url_api/login", func(c *gin.Context) {
+		loginHandler(c, store)
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/url_api/login",
+		strings.NewReader(`{"account":"roy","password":"secret"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+
+	if response.Body.String() != `{"error":"failed to log in"}` {
+		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to log in"}`)
+	}
+}
+
+func TestCreateMemberReturnsInternalServerErrorWhenSaveFails(t *testing.T) {
+	store := fakeShortURLStore{
+		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{}, nil
+		},
+		putItem: func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			return nil, errors.New("DynamoDB unavailable")
+		},
+	}
+	router := gin.New()
+	router.POST("/url_api/create_member", func(c *gin.Context) {
+		createMember(c, store, store)
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/url_api/create_member",
+		strings.NewReader(`{"account":"roy","password":"secret"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+
+	if response.Body.String() != `{"error":"failed to create member"}` {
+		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to create member"}`)
+	}
+}
+
+func TestCreateMemberReturnsInternalServerErrorWhenUserLookupFails(t *testing.T) {
+	store := fakeShortURLStore{
+		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return nil, errors.New("DynamoDB unavailable")
+		},
+	}
+	router := gin.New()
+	router.POST("/url_api/create_member", func(c *gin.Context) {
+		createMember(c, store, store)
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/url_api/create_member",
+		strings.NewReader(`{"account":"roy","password":"secret"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+
+	if response.Body.String() != `{"error":"failed to create member"}` {
+		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to create member"}`)
+	}
+}
+
+func TestAddItineraryReturnsInternalServerErrorWhenSaveFails(t *testing.T) {
+	store := fakeShortURLStore{
+		putItem: func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			return nil, errors.New("DynamoDB unavailable")
+		},
+	}
+	router := gin.New()
+	router.POST("/url_api/add_itinerary", func(c *gin.Context) {
+		c.Set("tokenValid", true)
+		addItinerary(c, store)
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/url_api/add_itinerary",
+		strings.NewReader(`{"timestamp":1,"account":"roy","title":"test","content":"test","date":"2026/09/02","time":"12:00","status":false}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+
+	if response.Body.String() != `{"error":"failed to create itinerary"}` {
+		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to create itinerary"}`)
+	}
+}
+
+func TestSubscribeNotificationReturnsInternalServerErrorWhenSaveFails(t *testing.T) {
+	store := fakeShortURLStore{
+		putItem: func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			return nil, errors.New("DynamoDB unavailable")
+		},
+	}
+	router := gin.New()
+	router.POST("/url_api/subscribe", func(c *gin.Context) {
+		c.Set("tokenValid", true)
+		subscribeNotification(c, store)
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/url_api/subscribe",
+		strings.NewReader(`{"account":"roy","subscription":{"endpoint":"https://example.com","keys":{"p256dh":"key","auth":"auth"}}}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+
+	if response.Body.String() != `{"error":"failed to save subscription"}` {
+		t.Fatalf("body = %q, want %q", response.Body.String(), `{"error":"failed to save subscription"}`)
+	}
+}
+
+func TestCheckItineraryContinuesWhenSubscriptionLookupFails(t *testing.T) {
+	lookupCount := 0
+	store := &fakeItineraryReminderStore{
+		query: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			return &dynamodb.QueryOutput{Items: []map[string]*dynamodb.AttributeValue{
+				{"Account": {S: aws.String("first")}},
+				{"Account": {S: aws.String("second")}},
+			}}, nil
+		},
+		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			lookupCount++
+			if lookupCount == 1 {
+				return nil, errors.New("DynamoDB unavailable")
+			}
+			return &dynamodb.GetItemOutput{Item: map[string]*dynamodb.AttributeValue{
+				"Subscription": {M: map[string]*dynamodb.AttributeValue{
+					"Endpoint": nil,
+					"Keys":     nil,
+				}},
+			}}, nil
+		},
+	}
+
+	checkItinerary(store)
+
+	if lookupCount != 2 {
+		t.Fatalf("subscription lookups = %d, want 2", lookupCount)
 	}
 }

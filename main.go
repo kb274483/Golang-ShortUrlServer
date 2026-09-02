@@ -32,69 +32,6 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// 定義送出的資料結構
-type RequestUrlItem struct {
-	ID   string
-	Url  string
-	Date string
-	User string
-}
-
-var ErrShortURLNotFound = errors.New("short URL not found")
-
-type shortURLReader interface {
-	GetItem(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
-}
-
-type shortURLWriter interface {
-	PutItem(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
-}
-
-// 定義登入資訊
-type LoginData struct {
-	Account  string `json:"account"`
-	Password string `json:"password"`
-}
-
-// 建立會員資訊
-type CreateMember struct {
-	Account  string
-	Password string
-}
-
-// 取得會員歷史紀錄
-type MemberHistoryReq struct {
-	Account string `json:"user"`
-}
-
-// 定義前端傳來的行程資訊
-type itineraryData struct {
-	Timestamp int    `json:"timestamp"`
-	Account   string `json:"account"`
-	Title     string `json:"title"`
-	Content   string `json:"content"`
-	Date      string `json:"date"`
-	Time      string `json:"time"`
-	Status    bool   `json:"status"`
-}
-
-// 定義要存入資料庫的行程
-type saveItineraryData struct {
-	Timestamp int
-	Account   string
-	Title     string
-	Content   string
-	Date      string
-	Time      string
-	Status    bool
-}
-
-// 定義前端取行程資料的條件
-type itineraryReq struct {
-	Account string `json:"account"`
-	Date    string `json:"date"`
-}
-
 var (
 	googleOauthConfig *oauth2.Config
 )
@@ -104,47 +41,6 @@ var (
 	vapidPublicKey  string
 	vapidPrivateKey string
 )
-
-// 訂閱資訊
-type SubscriptionData struct {
-	Account      string `json:"account"`
-	Subscription struct {
-		Endpoint string `json:"endpoint"`
-		Keys     struct {
-			P256dh string `json:"p256dh"`
-			Auth   string `json:"auth"`
-		} `json:"keys"`
-	} `json:"subscription"`
-}
-
-// 存入資料庫的訂閱結構
-type SaveSubscriptionData struct {
-	Account      string
-	Subscription struct {
-		Endpoint string
-		Keys     struct {
-			P256dh string
-			Auth   string
-		}
-	}
-}
-
-type sendSub struct {
-	Subscription struct {
-		Endpoint string
-		Keys     struct {
-			P256dh string
-			Auth   string
-		}
-	}
-}
-
-// 要傳送的訊息
-type NotiPayload struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-	Icon  string `json:"icon"`
-}
 
 // 產生隨機字串
 func generateRandomString(length int) (string, error) {
@@ -275,140 +171,6 @@ func main() {
 	log.Fatal(router.Run(":" + port))
 }
 
-func newRouter(svc *dynamodb.DynamoDB) *gin.Engine {
-	r := gin.Default()
-
-	registerHealthRoutes(r)
-	registerShortURLRoutes(r, svc)
-	registerAuthRoutes(r, svc)
-	registerItineraryRoutes(r, svc)
-	registerNotificationRoutes(r, svc)
-
-	return r
-}
-
-func registerHealthRoutes(r *gin.Engine) {
-	r.GET("/url_api/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-}
-
-func registerShortURLRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
-	// 測試用
-	r.GET("/url_api/hello", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
-	})
-	// 轉址
-	r.GET("/url_api/:key", resolveShortURLHandler(svc))
-	// 產生短網址
-	r.POST("/url_api/generate_short_url", validateToken(), func(c *gin.Context) {
-		auth := c.GetHeader("Authorization")
-		splitArr := strings.Split(auth, " ")
-		token := ""
-		if len(splitArr) >= 2 {
-			token = splitArr[1]
-		}
-		generateShortURLHandler(c, token, svc)
-	})
-}
-
-func registerAuthRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
-	// 登入
-	r.POST("/url_api/login", func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		loginHandler(c)
-	})
-	// 第三方登入
-	r.GET("/url_api/google_login", func(c *gin.Context) {
-		url := googleOauthConfig.AuthCodeURL(googleStateStr)
-		c.JSON(http.StatusOK, gin.H{"redirectUrl": url})
-	})
-	// Google 回調
-	r.GET("/url_api/google_call_back", func(c *gin.Context) {
-		userData := handlerGoogleCallBack(c)
-		if userData != nil {
-			userEmail, emailExist := userData["email"].(string)
-			if !emailExist {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Email not found in userData"})
-				return
-			}
-			splitEmail := strings.Split(userEmail, "@")
-			if len(splitEmail) > 0 {
-				account := splitEmail[0]
-				token, err := GenerateJWT(account)
-				if err != nil {
-					c.JSON(500, gin.H{"error": "something wrong"})
-					return
-				}
-				c.JSON(http.StatusOK, gin.H{
-					"msg":       "login success",
-					"user_name": account,
-					"token":     token,
-				})
-			} else {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Email split error"})
-			}
-		}
-	})
-	// 建立會員
-	r.POST("/url_api/create_member", func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		createMember(c)
-	})
-	// 取得會員歷史紀錄
-	r.POST("/url_api/member_history", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		queryMemberHistory(c)
-	})
-}
-
-func registerItineraryRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
-	// 建立行程事件
-	r.POST("/url_api/add_itinerary", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		addItinerary(c)
-	})
-	// 取得當天行程
-	r.POST("/url_api/get_itinerary", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		getItinerary(c)
-	})
-	// 更新事件
-	r.POST("/url_api/update_itinerary", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		updeateItinerary(c)
-	})
-	// 刪除事件
-	r.POST("/url_api/delete_itinerary", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		deleteItinerary(c)
-	})
-}
-
-func registerNotificationRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
-	// 取得VAPID KEY
-	r.GET("/url_api/get_vapid_key", validateToken(), func(c *gin.Context) {
-		value, exists := c.Get("tokenValid")
-		if !exists {
-			return
-		}
-		isLogin, ok := value.(bool)
-		if !ok {
-			return
-		}
-		if !isLogin {
-			c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"publicKey": vapidPublicKey})
-	})
-	// 訂閱
-	r.POST("/url_api/subscribe", validateToken(), func(c *gin.Context) {
-		c.Set("dynamodb", svc)
-		subscribeNotification(c)
-	})
-}
-
 // 短網址Handler
 func generateShortURLHandler(c *gin.Context, token string, store shortURLWriter) {
 	// 接收POST參數
@@ -524,7 +286,7 @@ func SaveItem(key string, url string, date string, user string, loginStatus bool
 }
 
 // 登入handler
-func loginHandler(c *gin.Context) {
+func loginHandler(c *gin.Context, store userDataReader) {
 	// 接收登入的POST參數
 	var userLogin LoginData
 	if err := c.BindJSON(&userLogin); err != nil {
@@ -533,26 +295,17 @@ func loginHandler(c *gin.Context) {
 	}
 	Account := userLogin.Account
 	Password := userLogin.Password
-	svc, exists := c.Get("dynamodb")
-	if !exists {
-		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
-		return
-	}
-	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
-	if !ok {
-		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
-		return
-	}
-	checkPassword, error := getUserDataList(Account, dynamoDBService)
-	if error != nil {
-		c.JSON(http.StatusOK, gin.H{"error": error.Error()})
+	checkPassword, err := getUserDataList(Account, store)
+	if err != nil {
+		log.Printf("look up login account %q: %v", Account, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to log in"})
 		return
 	}
 	if checkPassword == "does not exist" {
 		c.JSON(401, gin.H{"error": "login fail"})
 		return
 	}
-	err := bcrypt.CompareHashAndPassword([]byte(checkPassword), []byte(Password))
+	err = bcrypt.CompareHashAndPassword([]byte(checkPassword), []byte(Password))
 	if err != nil {
 		c.JSON(401, gin.H{"error": "login fail"})
 		return
@@ -630,7 +383,7 @@ func GenerateJWT(userName string) (string, error) {
 }
 
 // 取得User資料表
-func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
+func getUserDataList(Account string, svc userDataReader) (string, error) {
 	// 透過帳號去搜尋是否有符合的項目
 	search := &dynamodb.GetItemInput{
 		TableName: aws.String("user_data"),
@@ -642,10 +395,13 @@ func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
 	}
 	result, err := svc.GetItem(search)
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("get user data for %q: %w", Account, err)
+	}
+	if result == nil {
+		return "does not exist", nil
 	}
 	item, ok := result.Item["Password"]
-	if !ok {
+	if !ok || item == nil || item.S == nil {
 		return "does not exist", nil
 	}
 	password := aws.StringValue(item.S)
@@ -653,7 +409,7 @@ func getUserDataList(Account string, svc *dynamodb.DynamoDB) (string, error) {
 }
 
 // 建立新會員
-func createMember(c *gin.Context) {
+func createMember(c *gin.Context, reader userDataReader, writer userDataWriter) {
 	// 接收會員POST參數
 	var userLogin LoginData
 	if err := c.BindJSON(&userLogin); err != nil {
@@ -662,20 +418,11 @@ func createMember(c *gin.Context) {
 	}
 	Account := userLogin.Account
 	Password := userLogin.Password
-	svc, exists := c.Get("dynamodb")
-	if !exists {
-		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
-		return
-	}
-	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
-	if !ok {
-		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
-		return
-	}
 	// 確認帳號是否存在
-	checkAccount, error := getUserDataList(Account, dynamoDBService)
-	if error != nil {
-		c.JSON(500, gin.H{"error": error.Error()})
+	checkAccount, err := getUserDataList(Account, reader)
+	if err != nil {
+		log.Printf("look up member account %q: %v", Account, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create member"})
 		return
 	}
 	// 帳號不存在 則為密碼作加密
@@ -683,14 +430,16 @@ func createMember(c *gin.Context) {
 		encrypted := []byte(Password)
 		hashedPassword, err := bcrypt.GenerateFromPassword(encrypted, bcrypt.DefaultCost)
 		if err != nil {
-			c.JSON(500, gin.H{"error": error.Error()})
+			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		saveStatus := saveMemberData(Account, string(hashedPassword), dynamoDBService)
-		if saveStatus == "Success" {
-			c.JSON(http.StatusOK, gin.H{"msg": "member create success"})
+		if err := saveMemberData(Account, string(hashedPassword), writer); err != nil {
+			log.Printf("save member account %q: %v", Account, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create member"})
 			return
 		}
+		c.JSON(http.StatusOK, gin.H{"msg": "member create success"})
+		return
 	} else {
 		c.JSON(403, gin.H{"error": "this account already exist"})
 		return
@@ -750,15 +499,14 @@ func queryMemberHistory(c *gin.Context) {
 }
 
 // 儲存新建的會員資料進資料庫
-func saveMemberData(account string, password string, svc *dynamodb.DynamoDB) string {
+func saveMemberData(account string, password string, svc userDataWriter) error {
 	item := CreateMember{
 		Account:  account,
 		Password: password,
 	}
 	av, err := dynamodbattribute.MarshalMap(item)
 	if err != nil {
-		fmt.Println("Error", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("marshal member item: %w", err)
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -766,14 +514,13 @@ func saveMemberData(account string, password string, svc *dynamodb.DynamoDB) str
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
-		fmt.Println("SaveError", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("save member item: %w", err)
 	}
-	return "Success"
+	return nil
 }
 
 // 建立新行程
-func addItinerary(c *gin.Context) {
+func addItinerary(c *gin.Context, store itineraryWriter) {
 	value, exists := c.Get("tokenValid")
 	if !exists {
 		return
@@ -800,30 +547,16 @@ func addItinerary(c *gin.Context) {
 	Time := newEvent.Time
 	Status := newEvent.Status
 
-	// 資料庫
-	svc, exists := c.Get("dynamodb")
-	if !exists {
-		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
+	if err := saveItineraryToDB(Timestamp, Account, Title, Content, Date, Time, Status, store); err != nil {
+		log.Printf("save itinerary for account %q: %v", Account, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create itinerary"})
 		return
 	}
-	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
-	if !ok {
-		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
-		return
-	}
-
-	saveStatus := saveItineraryToDB(Timestamp, Account, Title, Content, Date, Time, Status, dynamoDBService)
-	if saveStatus == "Success" {
-		c.JSON(http.StatusOK, gin.H{"msg": "Itinerary create success"})
-		return
-	} else {
-		c.JSON(500, gin.H{"error": "Save itinerary data error"})
-		return
-	}
+	c.JSON(http.StatusOK, gin.H{"msg": "Itinerary create success"})
 }
 
 // 將行程存入資料庫
-func saveItineraryToDB(timestamp int, account string, title string, content string, date string, time string, status bool, svc *dynamodb.DynamoDB) string {
+func saveItineraryToDB(timestamp int, account string, title string, content string, date string, time string, status bool, svc itineraryWriter) error {
 	item := saveItineraryData{
 		Timestamp: timestamp,
 		Account:   account,
@@ -835,8 +568,7 @@ func saveItineraryToDB(timestamp int, account string, title string, content stri
 	}
 	av, err := dynamodbattribute.MarshalMap(item)
 	if err != nil {
-		fmt.Println("Error", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("marshal itinerary item: %w", err)
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -844,10 +576,9 @@ func saveItineraryToDB(timestamp int, account string, title string, content stri
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
-		fmt.Println("SaveError", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("save itinerary item: %w", err)
 	}
-	return "Success"
+	return nil
 }
 
 // 取得當天行程
@@ -1023,7 +754,7 @@ func deleteItinerary(c *gin.Context) {
 }
 
 // 訂閱
-func subscribeNotification(c *gin.Context) {
+func subscribeNotification(c *gin.Context, store subscriptionWriter) {
 	value, exists := c.Get("tokenValid")
 	if !exists {
 		return
@@ -1034,16 +765,6 @@ func subscribeNotification(c *gin.Context) {
 	}
 	if !isLogin {
 		c.JSON(401, gin.H{"error": "Not logged in or your certificate has expired, please log in again"})
-		return
-	}
-	svc, exists := c.Get("dynamodb")
-	if !exists {
-		c.JSON(500, gin.H{"error": "DynamoDB service not available"})
-		return
-	}
-	dynamoDBService, ok := svc.(*dynamodb.DynamoDB)
-	if !ok {
-		c.JSON(500, gin.H{"error": "Failed to get DynamoDB service"})
 		return
 	}
 	var subscription SubscriptionData
@@ -1063,24 +784,26 @@ func subscribeNotification(c *gin.Context) {
 	}
 	av, err := dynamodbattribute.MarshalMap(item)
 	if err != nil {
-		fmt.Println("Error", err.Error())
-		os.Exit(1)
+		log.Printf("marshal subscription for account %q: %v", subscription.Account, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save subscription"})
+		return
 	}
 
 	input := &dynamodb.PutItemInput{
 		Item:      av,
 		TableName: aws.String("subscription"),
 	}
-	_, err = dynamoDBService.PutItem(input)
+	_, err = store.PutItem(input)
 	if err != nil {
-		fmt.Println("SaveError", err.Error())
-		os.Exit(1)
+		log.Printf("save subscription for account %q: %v", subscription.Account, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save subscription"})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"msg": "Subscribe Successfully"})
 }
 
 // 搜尋行程資料表
-func checkItinerary(svc *dynamodb.DynamoDB) {
+func checkItinerary(svc itineraryReminderStore) {
 	if svc == nil {
 		fmt.Println("DB Error: svc is nil")
 		return
@@ -1093,7 +816,8 @@ func checkItinerary(svc *dynamodb.DynamoDB) {
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Fatalf("Failed to encode payload: %v", err)
+		log.Printf("encode itinerary notification payload: %v", err)
+		return
 	}
 	now := time.Now()
 	// 載入時區
@@ -1147,21 +871,30 @@ func checkItinerary(svc *dynamodb.DynamoDB) {
 		}
 		res, err := svc.GetItem(searchSub)
 		if err != nil {
-			log.Fatal(err)
-			return
+			log.Printf("get subscription for account %q: %v", acc, err)
+			continue
 		}
-		item := res.Item["Subscription"].M
+		if res == nil {
+			log.Printf("subscription result for account %q is empty", acc)
+			continue
+		}
+		subscriptionItem, ok := res.Item["Subscription"]
+		if !ok || subscriptionItem == nil || subscriptionItem.M == nil {
+			log.Printf("subscription for account %q is missing", acc)
+			continue
+		}
+		item := subscriptionItem.M
 		// item資料結構轉換
 		var subscription sendSub
-		if val, ok := item["Endpoint"]; ok && val.S != nil {
+		if val, ok := item["Endpoint"]; ok && val != nil && val.S != nil {
 			subscription.Subscription.Endpoint = *val.S
 		}
 
-		if keys, ok := item["Keys"]; ok && keys.M != nil {
-			if auth, ok := keys.M["Auth"]; ok && auth.S != nil {
+		if keys, ok := item["Keys"]; ok && keys != nil && keys.M != nil {
+			if auth, ok := keys.M["Auth"]; ok && auth != nil && auth.S != nil {
 				subscription.Subscription.Keys.Auth = *auth.S
 			}
-			if p256dh, ok := keys.M["P256dh"]; ok && p256dh.S != nil {
+			if p256dh, ok := keys.M["P256dh"]; ok && p256dh != nil && p256dh.S != nil {
 				subscription.Subscription.Keys.P256dh = *p256dh.S
 			}
 		}
