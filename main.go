@@ -212,8 +212,6 @@ func init() {
 }
 
 func main() {
-	// 初始化 Gin 引擎
-	r := gin.Default()
 	// 載入環境變數
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("無法載入 .env 文件")
@@ -258,8 +256,34 @@ func main() {
 		Endpoint: google.Endpoint,
 	}
 
-	// r.Use(CORSMiddleware()) // 關閉跨域
-	// 定義路由
+	router := newRouter(svc)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Fatal(router.Run(":" + port))
+}
+
+func newRouter(svc *dynamodb.DynamoDB) *gin.Engine {
+	r := gin.Default()
+
+	registerHealthRoutes(r)
+	registerShortURLRoutes(r, svc)
+	registerAuthRoutes(r, svc)
+	registerItineraryRoutes(r, svc)
+	registerNotificationRoutes(r, svc)
+
+	return r
+}
+
+func registerHealthRoutes(r *gin.Engine) {
+	r.GET("/url_api/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+}
+
+func registerShortURLRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 	// 測試用
 	r.GET("/url_api/hello", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
@@ -285,6 +309,9 @@ func main() {
 		}
 		generateShortURLHandler(c, token)
 	})
+}
+
+func registerAuthRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 	// 登入
 	r.POST("/url_api/login", func(c *gin.Context) {
 		c.Set("dynamodb", svc)
@@ -332,6 +359,9 @@ func main() {
 		c.Set("dynamodb", svc)
 		queryMemberHistory(c)
 	})
+}
+
+func registerItineraryRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 	// 建立行程事件
 	r.POST("/url_api/add_itinerary", validateToken(), func(c *gin.Context) {
 		c.Set("dynamodb", svc)
@@ -352,6 +382,9 @@ func main() {
 		c.Set("dynamodb", svc)
 		deleteItinerary(c)
 	})
+}
+
+func registerNotificationRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 	// 取得VAPID KEY
 	r.GET("/url_api/get_vapid_key", validateToken(), func(c *gin.Context) {
 		value, exists := c.Get("tokenValid")
@@ -373,9 +406,6 @@ func main() {
 		c.Set("dynamodb", svc)
 		subscribeNotification(c)
 	})
-	// 啟動服務
-	port := ":8080"
-	log.Fatal(r.Run(port))
 }
 
 // 短網址Handler
