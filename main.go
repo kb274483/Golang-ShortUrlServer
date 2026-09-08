@@ -55,16 +55,6 @@ func generateRandomString(length int) (string, error) {
 	return randomString[:length], nil
 }
 
-// 產生JWT隨機密鑰
-func generateSecretKey(length int) ([]byte, error) {
-	bytes := make([]byte, length)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		return nil, err
-	}
-	return bytes, nil
-}
-
 // 驗證JWT憑證是否正確有效
 func validateToken() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -99,21 +89,11 @@ var googleStateStr string
 
 func init() {
 	var err error
-	JWTKey, err = generateSecretKey(32)
-	if err != nil {
-		log.Fatalf("Failed to generate JWT secret key: %v", err)
-	}
 	googleStateStr, err = generateRandomString(10)
 
 	if err != nil {
 		fmt.Println("生成隨機字串時發生錯誤:", err)
 		return
-	}
-
-	// 產生VAPID KEY
-	vapidPrivateKey, vapidPublicKey, err = webpush.GenerateVAPIDKeys()
-	if err != nil {
-		log.Fatalf("Failed to generate VAPID keys: %v", err)
 	}
 }
 
@@ -122,6 +102,14 @@ func main() {
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Fatalf("load .env: %v", err)
 	}
+	secrets, err := loadRuntimeSecrets()
+	if err != nil {
+		log.Fatalf("load runtime secrets: %v", err)
+	}
+	JWTKey = secrets.jwtKey
+	vapidPublicKey = secrets.vapidPublicKey
+	vapidPrivateKey = secrets.vapidPrivateKey
+
 	awsRegion := os.Getenv("AWS_REGION")
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -155,10 +143,10 @@ func main() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GCP_CLIENT_SECRET_ID"),
 		ClientSecret: os.Getenv("GCP_CLIENT_SECRET_KEY"),
-		RedirectURL:  "https://brief-url.link", // 正式環境
-		// RedirectURL: "http://localhost:9001", // 測試環境
-		Scopes:   []string{"https://www.googleapis.com/auth/userinfo.email"},
-		Endpoint: google.Endpoint,
+		// RedirectURL:  "https://brief-url.link", // 正式環境
+		RedirectURL: "http://localhost:9001", // 測試環境
+		Scopes:      []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint:    google.Endpoint,
 	}
 
 	router := newRouter(svc)
@@ -925,21 +913,4 @@ func sendNotification(subscribe sendSub, payload []byte) error {
 	defer resp.Body.Close()
 	log.Printf("Successfully sent notification: %v", resp.Status)
 	return nil
-}
-
-// 本地端跨域處理
-func CORSMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-
-		c.Next()
-	}
 }

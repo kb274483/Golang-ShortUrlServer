@@ -22,3 +22,13 @@
 * 後端再使用這個token向google資源伺服器獲取用戶資訊，成功後並將資訊與JWT token回傳給前端。
 
 * 我的資料庫中並沒有保存google這邊回傳的用戶資訊，僅留下Email中帳戶名稱的部位，紀錄在歷史紀錄中而已，可以放心試用。
+
+## Runtime secrets
+
+JWT signing and Web Push VAPID keys must be provided through runtime environment variables. Generate a new set locally with:
+
+```bash
+go run ./cmd/generate-secrets
+```
+
+Copy the three generated lines into `.env`. Never commit `.env` or paste these values into logs, issues, or chat messages. Keep the same values across application and container restarts.
