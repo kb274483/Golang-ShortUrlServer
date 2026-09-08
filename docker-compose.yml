@@ -1,0 +1,12 @@
+services:
+  api:
+    build:
+      context: .
+    image: shorturl-api:local
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped

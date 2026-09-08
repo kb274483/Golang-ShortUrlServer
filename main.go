@@ -119,9 +119,8 @@ func init() {
 
 func main() {
 	// 載入環境變數
-	if err := godotenv.Load(); err != nil {
-		fmt.Println("無法載入 .env 文件")
-		return
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Fatalf("load .env: %v", err)
 	}
 	awsRegion := os.Getenv("AWS_REGION")
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
