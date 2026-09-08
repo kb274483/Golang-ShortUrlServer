@@ -6,11 +6,24 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/gin-gonic/gin"
 )
+
+func TestTaipeiTimezoneDataIsAvailable(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Taipei")
+	if err != nil {
+		t.Fatalf("load Asia/Taipei timezone: %v", err)
+	}
+
+	_, offset := time.Date(2026, time.September, 8, 12, 0, 0, 0, location).Zone()
+	if offset != 8*60*60 {
+		t.Fatalf("Asia/Taipei UTC offset = %d seconds, want %d", offset, 8*60*60)
+	}
+}
 
 func TestHealthz(t *testing.T) {
 	router := newRouter(nil)

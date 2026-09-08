@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // Keep named time zones available in minimal container images.
 
 	"github.com/SherClockHolmes/webpush-go"
 	"github.com/aws/aws-sdk-go/aws"
