@@ -1,0 +1,164 @@
+name: Backend Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Known-good shorturl-api task definition revision (for example, 2)"
+        required: true
+        type: string
+      reason:
+        description: "Reason for this rollback"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+# Share the deployment lock with build-and-push.yml. This waits for an active run;
+# it does not freeze future pushes or cancel an ECS deployment already submitted.
+concurrency:
+  group: shorturl-api-main
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_ACCOUNT_ID: "320080014524"
+  ECS_CLUSTER: shorturl-demo
+  ECS_SERVICE: shorturl-api
+  ECS_CONTAINER_NAME: api
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rollback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Validate rollback request
+        env:
+          TARGET_REVISION: ${{ inputs.revision }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
+        run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run this workflow from main so it can use the deployment role."
+            exit 1
+          fi
+          if [[ ! "$TARGET_REVISION" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The task definition revision must be a positive integer."
+            exit 1
+          fi
+          if [[ ! "$ROLLBACK_REASON" =~ [^[:space:]] ]]; then
+            echo "::error::A rollback reason is required."
+            exit 1
+          fi
+
+      - name: Get temporary AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::320080014524:role/ShortUrlGithubEcrPush
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "320080014524"
+
+      - name: Check the target and record the current version
+        id: target
+        env:
+          TARGET_REVISION: ${{ inputs.revision }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
+        run: |
+          target_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:task-definition/shorturl-api:$TARGET_REVISION"
+          aws ecs describe-task-definition \
+            --task-definition "$target_arn" \
+            --query taskDefinition --output json --no-cli-pager \
+            > "$RUNNER_TEMP/shorturl-rollback-target.json"
+
+          if ! jq -e --arg expected "$target_arn" --arg container "$ECS_CONTAINER_NAME" '
+            .taskDefinitionArn == $expected and
+            .family == "shorturl-api" and
+            .status == "ACTIVE" and
+            ([.containerDefinitions[] | select(.name == $container)] | length == 1) and
+            all(.containerDefinitions[] | select(.name == $container);
+              .image | test("^320080014524[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/shorturl-api(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$"))
+          ' "$RUNNER_TEMP/shorturl-rollback-target.json" > /dev/null; then
+            echo "::error::The target must be an active shorturl-api revision using this project's ECR image."
+            exit 1
+          fi
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --output json --no-cli-pager > "$RUNNER_TEMP/shorturl-before-rollback.json"
+          if ! jq -e --arg service "$ECS_SERVICE" '
+            (.failures | length == 0) and
+            (.services | length == 1) and
+            .services[0].serviceName == $service and
+            .services[0].status == "ACTIVE" and
+            (.services[0].taskDefinition | test("^arn:aws:ecs:ap-northeast-1:320080014524:task-definition/shorturl-api:[1-9][0-9]*$"))
+          ' "$RUNNER_TEMP/shorturl-before-rollback.json" > /dev/null; then
+            echo "::error::The expected active ECS service was not found."
+            exit 1
+          fi
+
+          current_arn="$(jq -r '.services[0].taskDefinition' "$RUNNER_TEMP/shorturl-before-rollback.json")"
+          image="$(jq -r --arg container "$ECS_CONTAINER_NAME" '.containerDefinitions[] | select(.name == $container) | .image' "$RUNNER_TEMP/shorturl-rollback-target.json")"
+          printf 'task-definition-arn=%s\n' "$target_arn" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Rollback request\n\n'
+            printf 'Requested by: `%s`\n\n' "$GITHUB_ACTOR"
+            printf 'Previous task definition: `%s`\n\n' "$current_arn"
+            printf 'Target task definition: `%s`\n\n' "$target_arn"
+            printf 'Target image: `%s`\n\n' "$image"
+            printf 'Reason: %s\n\n' "$ROLLBACK_REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy the selected task definition
+        env:
+          TARGET_TASK_DEFINITION: ${{ steps.target.outputs.task-definition-arn }}
+        run: |
+          # Leave desiredCount to Service Auto Scaling; reuse the existing image.
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$TARGET_TASK_DEFINITION" \
+            --query 'service.taskDefinition' --output text --no-cli-pager
+
+      - name: Wait for ECS stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+      - name: Verify the rollback revision
+        env:
+          TARGET_TASK_DEFINITION: ${{ steps.target.outputs.task-definition-arn }}
+        run: |
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --output json --no-cli-pager > "$RUNNER_TEMP/shorturl-after-rollback.json"
+
+          # Stability alone can also mean ECS rolled back to a different revision.
+          if ! jq -e --arg expected "$TARGET_TASK_DEFINITION" '
+            (.failures | length == 0) and
+            (.services | length == 1) and
+            (.services[0] |
+              .status == "ACTIVE" and
+              .taskDefinition == $expected and
+              .desiredCount > 0 and
+              .runningCount == .desiredCount and
+              .pendingCount == 0 and
+              (.deployments | length == 1) and
+              any(.deployments[];
+                .status == "PRIMARY" and
+                .taskDefinition == $expected and
+                .rolloutState == "COMPLETED"))
+          ' "$RUNNER_TEMP/shorturl-after-rollback.json" > /dev/null; then
+            echo "::error::ECS is not running the requested rollback revision in a completed deployment."
+            exit 1
+          fi
+
+          printf 'Rollback verified: `%s`\n' "$TARGET_TASK_DEFINITION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report rollback failure
+        if: ${{ failure() }}
+        run: |
+          printf '\nRollback failed or could not be verified. Check the failed step and ECS service events before retrying.\n' >> "$GITHUB_STEP_SUMMARY"
