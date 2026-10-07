@@ -9,7 +9,8 @@ import (
 )
 
 func newRouter(svc *dynamodb.DynamoDB) *gin.Engine {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(requestLogging(appLogger, appConfig), recoverRequests(appLogger))
 
 	registerHealthRoutes(r)
 	registerShortURLRoutes(r, svc)
@@ -52,11 +53,24 @@ func registerAuthRoutes(r *gin.Engine, svc *dynamodb.DynamoDB) {
 	})
 	// 第三方登入
 	r.GET("/url_api/google_login", func(c *gin.Context) {
-		url := googleOauthConfig.AuthCodeURL(googleStateStr)
+		if googleOauthConfig == nil || googleOauthConfig.ClientID == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Google login is not configured"})
+			return
+		}
+		state, err := issueGoogleState(c)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start Google login"})
+			return
+		}
+		url := googleOauthConfig.AuthCodeURL(state)
 		c.JSON(http.StatusOK, gin.H{"redirectUrl": url})
 	})
 	// Google 回調
 	r.GET("/url_api/google_call_back", func(c *gin.Context) {
+		if googleOauthConfig == nil || googleOauthConfig.ClientID == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Google login is not configured"})
+			return
+		}
 		userData := handlerGoogleCallBack(c)
 		if userData != nil {
 			userEmail, emailExist := userData["email"].(string)

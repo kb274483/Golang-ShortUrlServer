@@ -1,0 +1,68 @@
+name: Backend CI - Build and push to ECR
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REGISTRY: 320080014524.dkr.ecr.ap-northeast-1.amazonaws.com
+  ECR_REPOSITORY: shorturl-api
+  # Each retry gets a new tag because this repository uses immutable tags.
+  IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+  CGO_ENABLED: "0"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download and verify dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Check Go code
+        run: go vet ./...
+
+      - name: Verify Go compilation
+        run: go build ./...
+
+      - name: Build Docker image
+        run: |
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+
+      - name: Get temporary AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::320080014524:role/ShortUrlGithubEcrPush
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "320080014524"
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+        with:
+          registries: "320080014524"
+
+      - name: Push Docker image
+        run: |
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          printf 'Published image: `%s/%s:%s`\n' \
+            "$ECR_REGISTRY" "$ECR_REPOSITORY" "$IMAGE_TAG" >> "$GITHUB_STEP_SUMMARY"

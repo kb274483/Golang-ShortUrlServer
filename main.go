@@ -11,26 +11,19 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 	_ "time/tzdata" // Keep named time zones available in minimal container images.
 
-	"github.com/SherClockHolmes/webpush-go"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
-	"github.com/joho/godotenv"
-	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 var (
@@ -85,80 +78,6 @@ func validateToken() gin.HandlerFunc {
 // 產生JWT隨機密鑰
 var JWTKey []byte
 
-// 給google的隨機字串
-var googleStateStr string
-
-func init() {
-	var err error
-	googleStateStr, err = generateRandomString(10)
-
-	if err != nil {
-		fmt.Println("生成隨機字串時發生錯誤:", err)
-		return
-	}
-}
-
-func main() {
-	// 載入環境變數
-	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Fatalf("load .env: %v", err)
-	}
-	secrets, err := loadRuntimeSecrets()
-	if err != nil {
-		log.Fatalf("load runtime secrets: %v", err)
-	}
-	JWTKey = secrets.jwtKey
-	vapidPublicKey = secrets.vapidPublicKey
-	vapidPrivateKey = secrets.vapidPrivateKey
-
-	awsRegion := os.Getenv("AWS_REGION")
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	// 與DynamoDB建立連線
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(awsRegion),
-		Credentials: credentials.NewStaticCredentials(
-			accessKey,
-			secretKey,
-			""),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	svc := dynamodb.New(sess)
-
-	// Cron Mission
-	c := cron.New()
-	// 每個整點和30分執行
-	// 0,30
-	_, err = c.AddFunc("0,30 * * * *", func() {
-		checkItinerary(svc)
-	})
-	if err != nil {
-		fmt.Println("cron unset", err)
-		return
-	}
-	c.Start()
-
-	// Google Config
-	googleOauthConfig = &oauth2.Config{
-		ClientID:     os.Getenv("GCP_CLIENT_SECRET_ID"),
-		ClientSecret: os.Getenv("GCP_CLIENT_SECRET_KEY"),
-		// RedirectURL:  "https://brief-url.link", // 正式環境
-		RedirectURL: "http://localhost:9001", // 測試環境
-		Scopes:      []string{"https://www.googleapis.com/auth/userinfo.email"},
-		Endpoint:    google.Endpoint,
-	}
-
-	router := newRouter(svc)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Fatal(router.Run(":" + port))
-}
-
 // 短網址Handler
 func generateShortURLHandler(c *gin.Context, token string, store shortURLWriter) {
 	// 接收POST參數
@@ -184,7 +103,7 @@ func generateShortURLHandler(c *gin.Context, token string, store shortURLWriter)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create short URL"})
 		return
 	}
-	shortURL := "https://brief-url.link/url_api/" + shortURLCode
+	shortURL := appConfig.PublicBaseURL + "/url_api/" + shortURLCode
 	c.JSON(http.StatusOK, gin.H{"short_url": shortURL})
 }
 func generateShortURL(originalURL string, user string, svc shortURLWriter, token string, loginStatus bool) (string, error) {
@@ -207,7 +126,7 @@ func generateShortURL(originalURL string, user string, svc shortURLWriter, token
 // 根據傳入的短網址參數搜尋 DynamoDB
 func GetUrlItem(key string, svc shortURLReader) (string, error) {
 	search := &dynamodb.GetItemInput{
-		TableName: aws.String("shorturl_service"),
+		TableName: aws.String(appConfig.Tables.ShortURLs),
 		Key: map[string]*dynamodb.AttributeValue{
 			"ID": {
 				S: aws.String(key),
@@ -264,7 +183,7 @@ func SaveItem(key string, url string, date string, user string, loginStatus bool
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
-		TableName: aws.String("shorturl_service"),
+		TableName: aws.String(appConfig.Tables.ShortURLs),
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
@@ -314,22 +233,22 @@ func loginHandler(c *gin.Context, store userDataReader) {
 
 // google 回調
 func handlerGoogleCallBack(c *gin.Context) map[string]interface{} {
-	// 檢查隨機字串的正確性
-	state := c.Query("state")
-	if state != googleStateStr {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "state error"})
+	if err := validateGoogleState(c); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid OAuth state"})
 		return nil
 	}
+	clearGoogleStateCookie(c)
 	// 得到google回應的授權碼
 	code := c.Query("code")
 	// 使用授權碼向google取得token
-	token, err := googleOauthConfig.Exchange(context.Background(), code)
+	ctx := context.WithValue(c.Request.Context(), oauth2.HTTPClient, &http.Client{Timeout: appConfig.HTTPTimeout})
+	token, err := googleOauthConfig.Exchange(ctx, code)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token get fail"})
 		return nil
 	}
 	// 再使用token去跟google的資源伺服器取得用戶資訊
-	googleUserData, err := getGoogleUserData(token)
+	googleUserData, err := getGoogleUserData(ctx, token)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "something wrong"})
 		return nil
@@ -337,13 +256,16 @@ func handlerGoogleCallBack(c *gin.Context) map[string]interface{} {
 	return googleUserData
 }
 
-func getGoogleUserData(token *oauth2.Token) (map[string]interface{}, error) {
-	client := googleOauthConfig.Client(context.Background(), token)
+func getGoogleUserData(ctx context.Context, token *oauth2.Token) (map[string]interface{}, error) {
+	client := googleOauthConfig.Client(ctx, token)
 	response, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Google userinfo returned HTTP %d", response.StatusCode)
+	}
 
 	var userInfo map[string]interface{}
 	if err := json.NewDecoder(response.Body).Decode(&userInfo); err != nil {
@@ -374,7 +296,7 @@ func GenerateJWT(userName string) (string, error) {
 func getUserDataList(Account string, svc userDataReader) (string, error) {
 	// 透過帳號去搜尋是否有符合的項目
 	search := &dynamodb.GetItemInput{
-		TableName: aws.String("user_data"),
+		TableName: aws.String(appConfig.Tables.Users),
 		Key: map[string]*dynamodb.AttributeValue{
 			"Account": {
 				S: aws.String(Account),
@@ -466,11 +388,11 @@ func queryMemberHistory(c *gin.Context) {
 	searchKey := expression.Key("User").Equal(expression.Value(memberHistoryReq.Account))
 	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
 	if err != nil {
-		fmt.Println("Got error building expression:", err)
+		log.Println("Got error building expression:", err)
 		return
 	}
 	queryInput := &dynamodb.QueryInput{
-		TableName:                 aws.String("shorturl_service"),
+		TableName:                 aws.String(appConfig.Tables.ShortURLs),
 		IndexName:                 aws.String("User-Date-index"),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
@@ -498,7 +420,7 @@ func saveMemberData(account string, password string, svc userDataWriter) error {
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
-		TableName: aws.String("user_data"),
+		TableName: aws.String(appConfig.Tables.Users),
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
@@ -560,7 +482,7 @@ func saveItineraryToDB(timestamp int, account string, title string, content stri
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
-		TableName: aws.String("daily_itinerary"),
+		TableName: aws.String(appConfig.Tables.Itineraries),
 	}
 	_, err = svc.PutItem(input)
 	if err != nil {
@@ -601,11 +523,11 @@ func getItinerary(c *gin.Context) {
 	searchKey := expression.Key("Account").Equal(expression.Value(itineraryReqData.Account)).And(expression.Key("Date").Equal(expression.Value(itineraryReqData.Date)))
 	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
 	if err != nil {
-		fmt.Println("Got error building expression:", err)
+		log.Println("Got error building expression:", err)
 		return
 	}
 	queryInput := &dynamodb.QueryInput{
-		TableName:                 aws.String("daily_itinerary"),
+		TableName:                 aws.String(appConfig.Tables.Itineraries),
 		IndexName:                 aws.String("Account-Date-index"),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
@@ -679,7 +601,7 @@ func updeateItinerary(c *gin.Context) {
 	}
 
 	input := &dynamodb.UpdateItemInput{
-		TableName:                 aws.String("daily_itinerary"),
+		TableName:                 aws.String(appConfig.Tables.Itineraries),
 		Key:                       key,
 		UpdateExpression:          aws.String(updateExpr),
 		ExpressionAttributeNames:  exprAttrNames,
@@ -730,7 +652,7 @@ func deleteItinerary(c *gin.Context) {
 	}
 
 	input := &dynamodb.DeleteItemInput{
-		TableName: aws.String("daily_itinerary"),
+		TableName: aws.String(appConfig.Tables.Itineraries),
 		Key:       key,
 	}
 	_, err := dynamoDBService.DeleteItem(input)
@@ -779,7 +701,7 @@ func subscribeNotification(c *gin.Context, store subscriptionWriter) {
 
 	input := &dynamodb.PutItemInput{
 		Item:      av,
-		TableName: aws.String("subscription"),
+		TableName: aws.String(appConfig.Tables.Subscriptions),
 	}
 	_, err = store.PutItem(input)
 	if err != nil {
@@ -788,130 +710,4 @@ func subscribeNotification(c *gin.Context, store subscriptionWriter) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"msg": "Subscribe Successfully"})
-}
-
-// 搜尋行程資料表
-func checkItinerary(svc itineraryReminderStore) {
-	if svc == nil {
-		fmt.Println("DB Error: svc is nil")
-		return
-	}
-	// 建立Payload
-	payload := NotiPayload{
-		Title: "Trip reminder",
-		Body:  "Are you ready to start?",
-		Icon:  "https://cdn-icons-png.flaticon.com/512/4906/4906333.png",
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("encode itinerary notification payload: %v", err)
-		return
-	}
-	now := time.Now()
-	// 載入時區
-	loc, err := time.LoadLocation("Asia/Taipei")
-	if err != nil {
-		fmt.Println("Error loading location: ", err)
-		return
-	}
-	twTime := now.In(loc)
-	// 處理時間成字串格式
-	dateStr := twTime.Format("2006/01/02")
-	startTimeStr := twTime.Format("15:04")
-	endTime := twTime.Add(30 * time.Minute)
-	endTimeStr := endTime.Format("15:04")
-
-	searchKey := expression.Key("Date").Equal(expression.Value(dateStr)).And(expression.Key("Time").Between((expression.Value(startTimeStr)), (expression.Value(endTimeStr))))
-	expr, err := expression.NewBuilder().WithKeyCondition(searchKey).Build()
-	if err != nil {
-		fmt.Println("Got error building expression:", err)
-		return
-	}
-	queryInput := &dynamodb.QueryInput{
-		TableName:                 aws.String("daily_itinerary"),
-		IndexName:                 aws.String("Date-Time-index"),
-		ExpressionAttributeNames:  expr.Names(),
-		ExpressionAttributeValues: expr.Values(),
-		KeyConditionExpression:    expr.KeyCondition(),
-	}
-
-	result, err := svc.Query(queryInput)
-	if err != nil {
-		fmt.Println("Query failed:", err)
-		return
-	}
-	var accounts []string
-	for _, item := range result.Items {
-		if item["Account"] != nil && item["Account"].S != nil {
-			acc := *item["Account"].S
-			accounts = append(accounts, acc)
-		}
-	}
-	// 依據剛剛取出的Account去撈 subscription 資料表
-	for _, acc := range accounts {
-		searchSub := &dynamodb.GetItemInput{
-			TableName: aws.String("subscription"),
-			Key: map[string]*dynamodb.AttributeValue{
-				"Account": {
-					S: aws.String(acc),
-				},
-			},
-		}
-		res, err := svc.GetItem(searchSub)
-		if err != nil {
-			log.Printf("get subscription for account %q: %v", acc, err)
-			continue
-		}
-		if res == nil {
-			log.Printf("subscription result for account %q is empty", acc)
-			continue
-		}
-		subscriptionItem, ok := res.Item["Subscription"]
-		if !ok || subscriptionItem == nil || subscriptionItem.M == nil {
-			log.Printf("subscription for account %q is missing", acc)
-			continue
-		}
-		item := subscriptionItem.M
-		// item資料結構轉換
-		var subscription sendSub
-		if val, ok := item["Endpoint"]; ok && val != nil && val.S != nil {
-			subscription.Subscription.Endpoint = *val.S
-		}
-
-		if keys, ok := item["Keys"]; ok && keys != nil && keys.M != nil {
-			if auth, ok := keys.M["Auth"]; ok && auth != nil && auth.S != nil {
-				subscription.Subscription.Keys.Auth = *auth.S
-			}
-			if p256dh, ok := keys.M["P256dh"]; ok && p256dh != nil && p256dh.S != nil {
-				subscription.Subscription.Keys.P256dh = *p256dh.S
-			}
-		}
-		sendNotification(subscription, payloadBytes)
-	}
-}
-
-// 發送訊息
-func sendNotification(subscribe sendSub, payload []byte) error {
-	s := &webpush.Subscription{
-		Endpoint: subscribe.Subscription.Endpoint,
-		Keys: webpush.Keys{
-			P256dh: subscribe.Subscription.Keys.P256dh,
-			Auth:   subscribe.Subscription.Keys.Auth,
-		},
-	}
-	resp, err := webpush.SendNotification(payload, s, &webpush.Options{
-		Subscriber:      "kb274483@gmail.com",
-		VAPIDPublicKey:  vapidPublicKey,
-		VAPIDPrivateKey: vapidPrivateKey,
-		TTL:             60,
-	})
-
-	if err != nil {
-		log.Printf("Failed to send notification: %v", err)
-		return err
-	}
-
-	defer resp.Body.Close()
-	log.Printf("Successfully sent notification: %v", resp.Status)
-	return nil
 }

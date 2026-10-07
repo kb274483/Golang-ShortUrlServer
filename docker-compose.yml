@@ -1,8 +1,9 @@
 services:
-  api:
+  api: &api
     build:
       context: .
     image: shorturl-api:local
+    command: ["api"]
     env_file:
       - .env
     environment:
@@ -10,3 +11,19 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
+    stop_grace_period: 30s
+
+  api2:
+    <<: *api
+    profiles: ["replicas"]
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  worker:
+    <<: *api
+    profiles: ["worker"]
+    command: ["worker"]
+    ports: []
+    restart: "no"
+    healthcheck:
+      disable: true

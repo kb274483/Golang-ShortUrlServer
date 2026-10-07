@@ -14,7 +14,8 @@ RUN CGO_ENABLED=0 go build \
 
 FROM alpine:3.20
 
-RUN addgroup -S -g 10001 shorturl \
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S -g 10001 shorturl \
     && adduser -S -D -H -u 10001 -G shorturl shorturl
 
 WORKDIR /app
@@ -30,4 +31,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/url_api/healthz || exit 1
 
+STOPSIGNAL SIGTERM
+
 ENTRYPOINT ["/app/shorturl"]
+CMD ["api"]

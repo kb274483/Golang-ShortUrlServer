@@ -1,5 +1,17 @@
 # Golang-ShortUrlServer
 
+## ECS migration preparation
+
+API / one-shot notification Worker modes, shared runtime configuration, IAM-role credentials, graceful shutdown and structured request logs are implemented. See [ECS preparation and verification](docs/ecs-preparation.md) for the startup flow, environment variables and two-replica verification. AWS resources and the independent notification schedule are not deployed yet.
+
+```bash
+go run . api
+# One-shot Worker: use test tables and test subscriptions when verifying delivery.
+go run . worker
+```
+
+With Docker and a configured development `.env`, use `docker compose --profile replicas up -d --build api api2` to expose API replicas on localhost ports 8080 and 8081. Both use the same runtime secrets and DynamoDB configuration.
+
 ### 2025/07/04 更新
 因為是自己架在EC2的服務，最近覺得每個月的開銷有點高，所以將這台伺服器設定成早上10點開機直到晚上10點關機了。
 在此以外的時間便會無法連線。
