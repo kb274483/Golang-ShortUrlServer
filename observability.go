@@ -67,7 +67,103 @@ func newRequestMetrics(service string, identity taskIdentity) *requestMetrics {
 	})
 	info.Set(1)
 	metrics.registry.MustRegister(metrics.requests, metrics.duration, info)
+	if endpoint := strings.TrimRight(os.Getenv("ECS_CONTAINER_METADATA_URI_V4"), "/"); endpoint != "" {
+		metrics.registry.MustRegister(newContainerResourceCollector(endpoint, labels))
+	}
 	return metrics
+}
+
+// Read resource usage only during a metrics scrape, not on the API request path.
+// These are this API container's values; the limits belong to its enclosing task.
+type containerResourceCollector struct {
+	endpoint                                    string
+	client                                      *http.Client
+	success, cpu, cpuLimit, memory, memoryLimit *prometheus.Desc
+}
+
+func newContainerResourceCollector(endpoint string, labels prometheus.Labels) *containerResourceCollector {
+	return &containerResourceCollector{
+		endpoint: endpoint,
+		client: &http.Client{
+			Timeout: time.Second,
+			// Task-local metadata must not go through an outbound HTTP proxy.
+			Transport:     &http.Transport{MaxIdleConnsPerHost: 2, IdleConnTimeout: 30 * time.Second},
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		success: prometheus.NewDesc("shorturl_container_resource_scrape_success",
+			"Whether this scrape obtained valid API container stats and task limits (1 or 0).", nil, labels),
+		cpu: prometheus.NewDesc("shorturl_container_cpu_usage_seconds_total",
+			"Cumulative CPU time consumed by this API container in seconds.", nil, labels),
+		cpuLimit: prometheus.NewDesc("shorturl_task_cpu_limit_cores",
+			"CPU allocated to the enclosing ECS task in vCPUs; not the container's CPU shares.", nil, labels),
+		memory: prometheus.NewDesc("shorturl_container_memory_usage_bytes",
+			"Current API container memory usage in bytes, including cache reported by the runtime.", nil, labels),
+		memoryLimit: prometheus.NewDesc("shorturl_task_memory_limit_bytes",
+			"Memory allocated to the enclosing ECS task in bytes.", nil, labels),
+	}
+}
+
+func (collector *containerResourceCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, descriptor := range []*prometheus.Desc{
+		collector.success, collector.cpu, collector.cpuLimit, collector.memory, collector.memoryLimit,
+	} {
+		ch <- descriptor
+	}
+}
+
+func (collector *containerResourceCollector) Collect(ch chan<- prometheus.Metric) {
+	// A metadata outage must not fail the existing HTTP metrics or report fake
+	// zero usage. The common deadline bounds both metadata requests together.
+	success := float64(0)
+	defer func() {
+		ch <- prometheus.MustNewConstMetric(collector.success, prometheus.GaugeValue, success)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var task struct {
+		Limits struct {
+			CPU    float64
+			Memory float64 // ECS metadata reports this in MiB.
+		}
+	}
+	if err := collector.getJSON(ctx, "/task", &task); err != nil || task.Limits.CPU <= 0 || task.Limits.Memory <= 0 {
+		return
+	}
+	var stats struct {
+		CPU struct {
+			Usage struct {
+				Total *uint64 `json:"total_usage"` // Runtime CPU time is in nanoseconds.
+			} `json:"cpu_usage"`
+		} `json:"cpu_stats"`
+		Memory struct {
+			Usage *uint64 `json:"usage"`
+		} `json:"memory_stats"`
+	}
+	if err := collector.getJSON(ctx, "/stats", &stats); err != nil || stats.CPU.Usage.Total == nil || stats.Memory.Usage == nil {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(collector.cpu, prometheus.CounterValue,
+		float64(*stats.CPU.Usage.Total)/float64(time.Second))
+	ch <- prometheus.MustNewConstMetric(collector.cpuLimit, prometheus.GaugeValue, task.Limits.CPU)
+	ch <- prometheus.MustNewConstMetric(collector.memory, prometheus.GaugeValue, float64(*stats.Memory.Usage))
+	ch <- prometheus.MustNewConstMetric(collector.memoryLimit, prometheus.GaugeValue, task.Limits.Memory*1024*1024)
+	success = 1
+}
+
+func (collector *containerResourceCollector) getJSON(ctx context.Context, path string, result interface{}) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, collector.endpoint+path, nil)
+	if err != nil {
+		return err
+	}
+	response, err := collector.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return errors.New("ECS metadata returned a non-200 status")
+	}
+	return json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(result)
 }
 
 func (metrics *requestMetrics) observe(c *gin.Context, route string, elapsed time.Duration) {
