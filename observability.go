@@ -5,14 +5,19 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type taskIdentity struct {
@@ -24,12 +29,115 @@ type jsonLogger struct {
 	out           io.Writer
 	service, mode string
 	identity      taskIdentity
+	metrics       *requestMetrics
 }
 
 var appLogger = newJSONLogger(os.Stdout, "shorturl", "startup", taskIdentity{TaskID: "local"})
 
 func newJSONLogger(out io.Writer, service, mode string, identity taskIdentity) *jsonLogger {
-	return &jsonLogger{out: out, service: service, mode: mode, identity: identity}
+	return &jsonLogger{
+		out: out, service: service, mode: mode, identity: identity,
+		metrics: newRequestMetrics(service, identity),
+	}
+}
+
+type requestMetrics struct {
+	registry *prometheus.Registry
+	requests *prometheus.CounterVec
+	duration *prometheus.HistogramVec
+}
+
+func newRequestMetrics(service string, identity taskIdentity) *requestMetrics {
+	labels := prometheus.Labels{
+		"service": service, "task_id": identity.TaskID, "availability_zone": identity.AvailabilityZone,
+	}
+	metricLabels := []string{"route", "method", "status", "request_kind"}
+	metrics := &requestMetrics{
+		registry: prometheus.NewRegistry(),
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "shorturl_http_requests_total", Help: "Completed HTTP requests handled by this task.", ConstLabels: labels,
+		}, metricLabels),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "shorturl_http_request_duration_seconds", Help: "HTTP handler duration in seconds.", ConstLabels: labels,
+			Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		}, metricLabels),
+	}
+	info := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shorturl_task_info", Help: "Task identity; always 1 while the metrics endpoint is available.", ConstLabels: labels,
+	})
+	info.Set(1)
+	metrics.registry.MustRegister(metrics.requests, metrics.duration, info)
+	return metrics
+}
+
+func (metrics *requestMetrics) observe(c *gin.Context, route string, elapsed time.Duration) {
+	method := c.Request.Method
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+	default:
+		method = "OTHER"
+	}
+	kind := "traffic"
+	if route == "/url_api/healthz" {
+		userAgent := c.Request.UserAgent()
+		host, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+		ip := net.ParseIP(host)
+		// Keep the k6 healthz workload separate from ALB and local wget probes.
+		localProbe := ip != nil && ip.IsLoopback() && (userAgent == "Wget" || strings.HasPrefix(userAgent, "Wget/"))
+		if strings.HasPrefix(userAgent, "ELB-HealthChecker/") || localProbe {
+			kind = "probe"
+		}
+	}
+	values := []string{route, method, strconv.Itoa(c.Writer.Status()), kind}
+	metrics.requests.WithLabelValues(values...).Inc()
+	metrics.duration.WithLabelValues(values...).Observe(elapsed.Seconds())
+}
+
+// Opt in with METRICS_ADDR=127.0.0.1:9090 locally. In ECS, bind a dedicated port
+// and permit access only from the monitoring security group; do not route it via ALB.
+func startMetricsServer(logger *jsonLogger, shutdownTimeout time.Duration) (func(), error) {
+	address := strings.TrimSpace(os.Getenv("METRICS_ADDR"))
+	if address == "" {
+		return func() {}, nil
+	}
+	handler := promhttp.HandlerFor(logger.metrics.registry, promhttp.HandlerOpts{
+		DisableCompression: true, MaxRequestsInFlight: 2, Timeout: 5 * time.Second,
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+	server := &http.Server{
+		Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second,
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.event("error", "metrics_server_failed", map[string]interface{}{"error": err.Error()})
+		}
+	}()
+	logger.event("info", "metrics_listening", map[string]interface{}{"address": listener.Addr().String()})
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			_ = server.Close()
+			logger.event("error", "metrics_shutdown_failed", map[string]interface{}{"error": err.Error()})
+		}
+		<-done
+	}, nil
 }
 
 func (logger *jsonLogger) event(level, event string, fields map[string]interface{}) {
@@ -117,9 +225,11 @@ func requestLogging(logger *jsonLogger, cfg config) gin.HandlerFunc {
 			route = "unmatched"
 		}
 		status := c.Writer.Status()
+		elapsed := time.Since(started)
+		logger.metrics.observe(c, route, elapsed)
 		fields := map[string]interface{}{
 			"request_id": id, "Route": route, "Method": c.Request.Method,
-			"status": status, "Latency": float64(time.Since(started).Microseconds()) / 1000,
+			"status": status, "Latency": float64(elapsed.Microseconds()) / 1000,
 		}
 		level := "info"
 		if status >= 500 {

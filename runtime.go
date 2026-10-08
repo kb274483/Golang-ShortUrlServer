@@ -95,6 +95,12 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	stopMetrics, err := startMetricsServer(appLogger, cfg.ShutdownTimeout)
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("listen for metrics: %w", err)
+	}
+	defer stopMetrics()
 	appLogger.event("info", "api_listening", map[string]interface{}{"address": server.Addr})
 	return serveHTTP(ctx, server, listener, cfg.ShutdownTimeout)
 }
