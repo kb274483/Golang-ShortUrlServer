@@ -21,6 +21,7 @@ env:
   ECS_SERVICE: shorturl-api
   ECS_CONTAINER_NAME: api
   PUBLIC_BASE_URL: https://app.brief-url.link
+  GOOGLE_REDIRECT_URL: https://app.brief-url.link/
   # Each retry gets a new tag because this repository uses immutable tags.
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
   CGO_ENABLED: "0"
@@ -94,7 +95,7 @@ jobs:
             --query 'taskDefinition' \
             --output json --no-cli-pager > "$RUNNER_TEMP/shorturl-task-definition.json"
 
-      - name: Set the new container image and public URL
+      - name: Set the new container image and runtime configuration
         id: render-task
         uses: aws-actions/amazon-ecs-render-task-definition@8d79160660ad39c402a16e5fc7cd2a32e8f7d6b7 # v1
         with:
@@ -103,6 +104,10 @@ jobs:
           image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           environment-variables: |
             PUBLIC_BASE_URL=${{ env.PUBLIC_BASE_URL }}
+            GOOGLE_REDIRECT_URL=${{ env.GOOGLE_REDIRECT_URL }}
+          secrets: |
+            GCP_CLIENT_SECRET_ID=arn:aws:ssm:ap-northeast-1:320080014524:parameter/shorturl/demo/GCP_CLIENT_SECRET_ID
+            GCP_CLIENT_SECRET_KEY=arn:aws:ssm:ap-northeast-1:320080014524:parameter/shorturl/demo/GCP_CLIENT_SECRET_KEY
 
       - name: Deploy to ECS and wait for stability
         id: deploy
