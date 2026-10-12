@@ -121,30 +121,55 @@ jobs:
           wait-max-delay-seconds: 15
 
       - name: Verify the deployed revision
+        timeout-minutes: 6
         env:
           EXPECTED_TASK_DEFINITION: ${{ steps.deploy.outputs.task-definition-arn }}
         run: |
-          aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --query 'services[0]' \
-            --output json --no-cli-pager > "$RUNNER_TEMP/shorturl-deployed-service.json"
+          service_file="$RUNNER_TEMP/shorturl-deployed-service.json"
+          # Service stability can precede the COMPLETED rollout state by a few seconds.
+          for attempt in {1..31}; do
+            aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$ECS_SERVICE" \
+              --query 'services[0]' \
+              --output json --no-cli-pager > "$service_file"
 
-          # A rollback can restore stability while leaving the old version running.
-          if ! jq -e --arg expected "$EXPECTED_TASK_DEFINITION" '
-            .status == "ACTIVE" and
-            .taskDefinition == $expected and
-            .desiredCount > 0 and
-            .runningCount == .desiredCount and
-            .pendingCount == 0 and
-            any(.deployments[];
-              .status == "PRIMARY" and
+            if jq -e --arg expected "$EXPECTED_TASK_DEFINITION" '
+              .status == "ACTIVE" and
               .taskDefinition == $expected and
-              .rolloutState == "COMPLETED")
-          ' "$RUNNER_TEMP/shorturl-deployed-service.json" > /dev/null; then
-            echo "::error::ECS did not finish deploying the expected revision; check for a rollback or unhealthy tasks."
-            exit 1
-          fi
+              .desiredCount > 0 and
+              .runningCount == .desiredCount and
+              .pendingCount == 0 and
+              any(.deployments[]?;
+                .status == "PRIMARY" and
+                .taskDefinition == $expected and
+                .rolloutState == "COMPLETED")
+            ' "$service_file" > /dev/null; then
+              printf 'Deployed task definition: `%s`\n' \
+                "$EXPECTED_TASK_DEFINITION" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
 
-          printf 'Deployed task definition: `%s`\n' \
-            "$EXPECTED_TASK_DEFINITION" >> "$GITHUB_STEP_SUMMARY"
+            # A rollback can restore stability while leaving the old version running.
+            if jq -e --arg expected "$EXPECTED_TASK_DEFINITION" '
+              any(.deployments[]?;
+                (.taskDefinition == $expected and .rolloutState == "FAILED") or
+                (.status == "PRIMARY" and .taskDefinition != $expected and
+                  .rolloutState == "COMPLETED"))
+            ' "$service_file" > /dev/null; then
+              echo "::error::ECS deployment failed or rolled back to another revision."
+              break
+            fi
+
+            if (( attempt == 31 )); then
+              echo "::error::ECS did not finish deploying the expected revision within the verification window."
+              break
+            fi
+            echo "Waiting for the expected ECS revision to complete ($attempt/31)."
+            sleep 10
+          done
+
+          jq '{status, taskDefinition, desiredCount, runningCount, pendingCount,
+            deployments: [.deployments[]? | {status, taskDefinition, rolloutState, rolloutStateReason}],
+            events: [.events[:5][]? | {createdAt, message}]}' "$service_file"
+          exit 1
