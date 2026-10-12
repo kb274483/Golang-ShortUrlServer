@@ -20,6 +20,7 @@ env:
   ECS_CLUSTER: shorturl-demo
   ECS_SERVICE: shorturl-api
   ECS_CONTAINER_NAME: api
+  PUBLIC_BASE_URL: https://app.brief-url.link
   # Each retry gets a new tag because this repository uses immutable tags.
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
   CGO_ENABLED: "0"
@@ -93,13 +94,15 @@ jobs:
             --query 'taskDefinition' \
             --output json --no-cli-pager > "$RUNNER_TEMP/shorturl-task-definition.json"
 
-      - name: Set the new container image
+      - name: Set the new container image and public URL
         id: render-task
         uses: aws-actions/amazon-ecs-render-task-definition@8d79160660ad39c402a16e5fc7cd2a32e8f7d6b7 # v1
         with:
           task-definition: ${{ runner.temp }}/shorturl-task-definition.json
           container-name: ${{ env.ECS_CONTAINER_NAME }}
           image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          environment-variables: |
+            PUBLIC_BASE_URL=${{ env.PUBLIC_BASE_URL }}
 
       - name: Deploy to ECS and wait for stability
         id: deploy
